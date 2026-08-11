@@ -1,0 +1,27 @@
+# IATIN — Dirty team pipeline (v0: ingest -> first spec)
+# Python 3.13+. Install into a project-local .venv:
+#   python -m venv .venv && .venv/Scripts/activate
+#   pip install -r requirements.txt
+
+# Artifact schema validation. Target the 4.x line; the legacy tree was written
+# against 3.x semantics and its schemas are exercised against 4.x in tests/.
+marshmallow>=4.0,<5.0
+
+# Loads the local .env so litellm (underneath AgentProvider) can read provider keys.
+python-dotenv>=1.0
+
+# --- Dev ---
+pytest>=8.0
+ruff>=0.6
+
+# --- Model access: AgentProvider (separate repo) ---
+# NOT INSTALLABLE YET. AgentProvider ships no pyproject.toml/setup.py, so
+# `pip install -e .` against it fails and it cannot be declared here as a real
+# dependency. Tracked as item #1 in AGENTPROVIDER-GAPS.md; being fixed in
+# parallel in that repo's FIXES.md.
+#
+# Until it lands, the pipeline is verified with the stub text client in
+# packages/agents/base_agent/client.py (no network, no credits), and the live
+# Gemini run stays deferred. Once AgentProvider is installable, add:
+#   agent-provider @ file:///../IATIN_AGENT_PROVIDER
+# or install it into this .venv with `pip install -e ../IATIN_AGENT_PROVIDER`.

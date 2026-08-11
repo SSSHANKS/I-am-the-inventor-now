@@ -1,0 +1,60 @@
+{
+  "artifacts_dir": "artifacts",
+  "workspace_dir": "temp",
+  "model_profiles_dir": "config/model_profiles",
+  "_model_provenance": {
+    "provider": "Gemini via AgentProvider (litellm model strings)",
+    "checked": "2026-08-09",
+    "model": "gemini/gemini-3.5-flash-lite",
+    "how": "Verified by a real call from this machine on 2026-08-09: AgentProvider(model='gemini/gemini-3.5-flash-lite').generate('ping') returned text (11 tokens).",
+    "cost": "Free. The API key belongs to a project with NO billing account, so a successful call can only have been served by the free tier - nothing is chargeable. The free-tier limits for this model (15 requests/min, 250000 input tokens/min) are enforced by AgentProvider's own rate_limit block in config/model_profiles/*.json.",
+    "note": "Never edit from memory - confirm by docs or a real call (CLAUDE.md section 9)."
+  },
+  "agents": {
+    "planner": {
+      "model": "gemini/gemini-3.5-flash-lite",
+      "profile": "strict_json",
+      "max_validation_retries": 6,
+      "_why": "Splits indexes into mini-tasks for every later stage; a weak plan starves the whole pipeline. Weak/algorithmic today - rebuilt in Step 1.5.",
+      "retry_profile": "strict_json_retry"
+    },
+    "doc_analyzer": {
+      "model": "gemini/gemini-3.5-flash-lite",
+      "profile": "strict_json",
+      "max_validation_retries": 6,
+      "max_read_file_lines": 500,
+      "_why": "Easiest stage: one pre-read documentation section in, one label plus one sentence out.",
+      "retry_profile": "strict_json_retry"
+    },
+    "code_facts_analyzer": {
+      "model": "gemini/gemini-3.5-flash-lite",
+      "profile": "strict_json",
+      "max_validation_retries": 6,
+      "max_read_file_lines": 500,
+      "_why": "Reads real source and must stay literal about symbols, calls and effects.",
+      "retry_profile": "strict_json_retry"
+    },
+    "behavior_analyzer": {
+      "model": "gemini/gemini-3.5-flash-lite",
+      "profile": "strict_json",
+      "max_validation_retries": 6,
+      "max_read_file_lines": 500,
+      "_why": "Synthesis across documentation plus code facts; the first stage that reasons rather than extracts.",
+      "retry_profile": "strict_json_retry"
+    },
+    "spec_synthesizer": {
+      "model": "gemini/gemini-3.5-flash-lite",
+      "profile": "strict_json",
+      "max_validation_retries": 6,
+      "_why": "Final crossing artifact. Carries the clean-room burden (CLAUDE.md section 2), so it gets the strongest model.",
+      "retry_profile": "strict_json_retry"
+    },
+    "plan_judge": {
+      "model": "gemini/gemini-3.5-flash-lite",
+      "profile": "strict_json",
+      "retry_profile": "strict_json_retry",
+      "max_validation_retries": 6,
+      "_why": "Grades plans it did not write, dirty-side against the original. Same model as the planner by decision: Flash-Lite's ~500/day free tier is what makes a multi-round loop affordable at all. Accepted cost is shared blind spots, mitigated by a critique-first prompt. Swapping it to a stronger model is one line here."
+    }
+  }
+}

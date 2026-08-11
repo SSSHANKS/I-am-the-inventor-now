@@ -1,0 +1,23 @@
+# Tooling configuration only. IATIN is an application, not a distributed package,
+# so there is no [project] table and nothing here is published.
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+# OLD/ is frozen reference material: it is read, never linted or reformatted.
+# iatin_vault/ is the knowledge base - prose and illustrative snippets, not code to format.
+extend-exclude = ["OLD", "iatin_vault", ".venv", "temp", "artifacts"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+ignore = [
+    "E501",    # long lines are almost all prompt text, where wrapping hurts readability
+    "RUF001",  # prompt text legitimately contains unicode punctuation
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E402"]  # sys.path is set up in conftest before packages are importable
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

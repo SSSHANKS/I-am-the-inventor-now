@@ -1,0 +1,39 @@
+# Environments
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Secrets - never commit real keys
+.env
+.env.*
+!.env.example
+secrets/
+
+# Runtime output (regenerated every run)
+artifacts/
+Artifacts/
+logs/
+temp/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+
+# Local-only agent settings
+.claude/
+
+# Legacy run output kept on disk as reference: indexes, plans, agent reports, the
+# weak code_specification.md that motivated this rework, and per-iteration dumps.
+# These are DIRTY-SIDE artifacts - they carry verbatim excerpts of the analysed
+# repository - so they stay out of history. Nothing containing the original should
+# travel with this repo (CLAUDE.md section 2).
+OLD/
+
+*.md
+iatin_vault/
