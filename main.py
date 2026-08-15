@@ -1,13 +1,14 @@
-"""Run the IATIN dirty-team pipeline against a git repository.
+"""Run the IATIN Dirty → Border pipeline against a git repository.
 
     python main.py https://github.com/owner/project
 
-Clones the repository, indexes it, plans and runs four analysis stages, and writes a
-behavioural specification plus every intermediate artifact to `artifacts/<run>/`.
+Clones the repository, indexes it, plans and runs four analysis stages, writes a
+behavioural specification, then Border judges whether anything original leaked.
+A failed Border verdict exits non-zero so Clean never receives a contaminated spec.
 
 The specification is a CROSSING artifact: it describes what the project does, never how
 the original expressed it (CLAUDE.md section 2). Use `--stub` to exercise the whole
-pipeline without spending model credits.
+pipeline without spending model credits. Use `--skip-border` for Dirty-only runs.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from config import ConfigError, load_environment, load_settings, setup_logging
 from packages.agents.base_agent import StubTextClient
+from packages.agents.border_team import BorderGateAgent, load_plan_artifacts
 from packages.agents.dirt_team import (
     BehaviorAnalyzerAgent,
     CodeFactsAgent,
@@ -30,6 +32,7 @@ from packages.agents.dirt_team import (
     SpecSynthesizerAgent,
 )
 from packages.agents.planning import PlanningAgent
+from packages.modules.border import BorderGateError
 from packages.modules.boundary import (
     BORDER_REVIEW,
     AliasMap,
@@ -57,7 +60,10 @@ STAGES = ("documentation", "code_facts", "behavior", "specification")
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="main.py",
-        description="Read a repository and produce a clean-room behavioural specification.",
+        description=(
+            "Read a repository, produce a clean-room behavioural specification, "
+            "and gate it through Border."
+        ),
     )
     parser.add_argument("repository", help="git URL of the repository to analyse")
     parser.add_argument(
@@ -75,6 +81,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--keep-clone",
         action="store_true",
         help="keep the cloned repository under temp/ instead of deleting it",
+    )
+    parser.add_argument(
+        "--skip-border",
+        action="store_true",
+        help="run Dirty only - record BORDER-REVIEW notes but do not enforce a verdict",
     )
     return parser.parse_args(argv)
 
@@ -121,8 +132,9 @@ def run(args: argparse.Namespace) -> Path:
     catalogue_artifact = build_evidence_catalogue(alias_map, code_index, doc_index)
     catalogue = catalogue_artifact["entries"]
     storage.save_artifact("evidence_catalogue.json", catalogue_artifact, EvidenceCatalogueSchema())
+    neutral_manifest_artifact = neutral_manifest(manifest, alias_map)
     storage.save_artifact(
-        "neutral_manifest.json", neutral_manifest(manifest, alias_map), NeutralManifestSchema()
+        "neutral_manifest.json", neutral_manifest_artifact, NeutralManifestSchema()
     )
     log.info(
         "registered %d identifier(s), minted %d evidence id(s), %d catalogue entries (%d note(s))",
@@ -147,6 +159,7 @@ def run(args: argparse.Namespace) -> Path:
 
     planner = PlanningAgent(**agent_kwargs("planner"))
     plan_judge = PlanJudgeAgent(**agent_kwargs("plan_judge"))
+    plan_files: list[str] = []
 
     def plan_for(stage: str) -> str:
         plan = planner.plan(
@@ -157,7 +170,9 @@ def run(args: argparse.Namespace) -> Path:
             code_index=code_index,
             doc_index=doc_index,
         )
-        storage.save_json(f"{_plan_name(stage)}.json", plan)
+        plan_name = f"{_plan_name(stage)}.json"
+        storage.save_json(plan_name, plan)
+        plan_files.append(plan_name)
         return plan
 
     documentation_report = DocumentationAgent(
@@ -204,16 +219,30 @@ def run(args: argparse.Namespace) -> Path:
     storage.save_private("alias_map.json", alias_map.to_private_dict())
     log.info("stage complete: specification")
 
-    # --- report ---------------------------------------------------------------
-    # Advisory only. Step 1 records leaks, Border enforces later (CLAUDE.md section 1).
-    #
-    # Counted from the rendered block rather than by scanning again. Re-scanning here
-    # would report a different number than the document shows: it would miss the content
-    # findings (which need the dirty-side corpus) and double-count identifiers quoted in
-    # the notes themselves. Reading what was written cannot drift from it.
+    # --- Border ---------------------------------------------------------------
+    # Dirty annotated leaks for visibility above. Border re-scans crossing artifacts
+    # (body only — the advisory appendix is stripped) and refuses the run on any finding.
     leaks = _rendered_findings(specification)
     if leaks:
-        log.warning("specification carries %d BORDER-REVIEW finding(s)", leaks)
+        log.warning("specification carries %d Dirty BORDER-REVIEW finding(s)", leaks)
+
+    if args.skip_border:
+        log.warning("Border skipped (--skip-border); crossing artifacts were not gated")
+    else:
+        plans = load_plan_artifacts(storage, plan_files)
+        BorderGateAgent(**agent_kwargs("border_gate")).enforce(
+            storage=storage,
+            alias_map=alias_map,
+            specification=specification,
+            documentation_report=documentation_report,
+            code_facts_report=code_facts_report,
+            behavior_report=behavior_report,
+            plans=plans,
+            evidence_catalogue=catalogue_artifact,
+            neutral_manifest=neutral_manifest_artifact,
+            repo_local_path=manifest.repo_local_path,
+        )
+        log.info("stage complete: border")
 
     if not args.keep_clone:
         _discard_clone(manifest.repo_local_path)
@@ -239,6 +268,28 @@ def _stubbed_reply(prompt: str) -> str:
                     "completeness": 3,
                 },
                 "actions": ["stubbed run - no real critique"],
+            }
+        )
+
+    if "<border_findings>" in prompt:
+        # Soft findings only reach this prompt. Stub dismisses them so hollow pipeline
+        # runs can still exercise Border wiring; hard leaks never ask the model.
+        try:
+            block = prompt.split("<border_findings>", 1)[1].split("</border_findings>", 1)[0]
+            findings = json.loads(block)
+        except (IndexError, json.JSONDecodeError):
+            findings = []
+        return json.dumps(
+            {
+                "decisions": [
+                    {
+                        "finding_id": item.get("finding_id", "BF-000"),
+                        "decision": "dismiss",
+                        "rationale": "stubbed adjudication - soft finding dismissed for pipeline wiring",
+                    }
+                    for item in findings
+                    if isinstance(item, dict)
+                ]
             }
         )
 
@@ -310,12 +361,18 @@ def main(argv: list[str] | None = None) -> int:
     except ConfigError as error:
         print(f"configuration problem: {error}", file=sys.stderr)
         return 2
+    except BorderGateError as error:
+        print(f"border refused: {error}", file=sys.stderr)
+        print(f"verdict: {error.verdict.finding_count} finding(s)", file=sys.stderr)
+        return 3
     except KeyboardInterrupt:
         print("interrupted", file=sys.stderr)
         return 130
 
     print(f"\nspecification: {spec_path}")
     print(f"artifacts:     {spec_path.parent}")
+    if not args.skip_border:
+        print(f"border:        {spec_path.parent / 'border_verdict.json'}")
     return 0
 
 

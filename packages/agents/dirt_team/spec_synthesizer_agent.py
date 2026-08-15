@@ -6,6 +6,7 @@ from packages.agents.base_agent import (
     BaseAgent,
 )
 from packages.agents.planning import format_mini_tasks, iter_mini_tasks, log_mini_tasks
+from packages.modules.border import evidence_excerpts
 from packages.modules.boundary import (
     AliasMap,
     annotate_border_review,
@@ -263,7 +264,7 @@ class SpecSynthesizerAgent(BaseAgent):
                     )
                 ),
                 alias_map,
-                _evidence_excerpts(documentation_report, code_facts_report, behavior_report),
+                evidence_excerpts(documentation_report, code_facts_report, behavior_report),
             )
 
         task_instruction = build_task_instruction(
@@ -285,7 +286,7 @@ class SpecSynthesizerAgent(BaseAgent):
                 )
             ),
             alias_map,
-            _evidence_excerpts(documentation_report, code_facts_report, behavior_report),
+            evidence_excerpts(documentation_report, code_facts_report, behavior_report),
         )
 
     def _reviewed(
@@ -296,8 +297,8 @@ class SpecSynthesizerAgent(BaseAgent):
     ) -> str:
         """Flag anything original that survived into the finished specification.
 
-        Advisory only. Step 1 does not gate on this - Border does, later (Q3). The
-        findings are appended to the document so a leak is visible rather than silent.
+        Dirty annotates for visibility. Border enforces separately (Q3) via
+        `border_verdict.json` and a non-zero exit when findings remain.
         """
         # Two independent layers. The first knows what the original was called; the
         # second knows what copied content looks like and needs no map at all. A leak
@@ -311,43 +312,6 @@ class SpecSynthesizerAgent(BaseAgent):
                 len(findings),
             )
         return annotate_border_review(markdown, findings)
-
-
-def _evidence_excerpts(*reports: str | dict[str, Any] | None) -> tuple[str, ...]:
-    """Every verbatim source line the dirty-side reports carry.
-
-    These excerpts never cross - `neutral_report` drops them before the prompt is built.
-    That is exactly what makes them a usable corpus: anything in the finished
-    specification that matches one word-for-word was carried across inside an agent's
-    prose, which is the one surface neutralisation deliberately preserves.
-
-    Only excerpts with a real source location count. A `missing` finding has no file to
-    quote, so the agent's own English is stored as its excerpt; feeding that back in made
-    the scanner flag the specification for restating our own words, which is a false
-    positive on every run that reports something missing.
-    """
-    found: list[str] = []
-
-    def walk(node: Any) -> None:
-        if isinstance(node, dict):
-            excerpt = node.get("excerpt")
-            if isinstance(excerpt, str) and excerpt.strip() and node.get("file"):
-                found.append(excerpt)
-            for key, value in node.items():
-                if key != "excerpt":
-                    walk(value)
-        elif isinstance(node, list):
-            for item in node:
-                walk(item)
-
-    for report in reports:
-        if isinstance(report, str):
-            try:
-                report = json.loads(report)
-            except (TypeError, ValueError):
-                continue
-        walk(report)
-    return tuple(found)
 
 
 def _neutral(

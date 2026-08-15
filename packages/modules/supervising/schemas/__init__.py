@@ -8,6 +8,11 @@ from packages.modules.supervising.schemas.behavior_analyzer import (
     BehaviorNarrowRequirementsSchema,
     BehaviorNarrowTestCandidatesSchema,
 )
+from packages.modules.supervising.schemas.border import (
+    BorderAdjudicationSchema,
+    BorderFindingSchema,
+    BorderVerdictSchema,
+)
 from packages.modules.supervising.schemas.code_facts_analyzer import (
     CODE_FACTS_OUTPUT_FIELDS,
     CodeFactsAnalyzerSchema,
@@ -46,6 +51,9 @@ __all__ = [
     "BehaviorNarrowOpenQuestionsSchema",
     "BehaviorNarrowRequirementsSchema",
     "BehaviorNarrowTestCandidatesSchema",
+    "BorderAdjudicationSchema",
+    "BorderFindingSchema",
+    "BorderVerdictSchema",
     "CodeFactsAnalyzerSchema",
     "CodeFactsNarrowCallsSchema",
     "CodeFactsNarrowErrorsSchema",

@@ -154,7 +154,8 @@ class AgentProviderClient(BaseChatClient):
         except ImportError as exc:
             raise ModelCallError(
                 "AgentProvider is not installed. Install it into this .venv with "
-                "`pip install -e ../IATIN_AGENT_PROVIDER`, or run with StubTextClient."
+                "`pip install -e ../Agent-Provider`, or run with StubTextClient "
+                "(python main.py --stub)."
             ) from exc
         self._providers[key] = AgentProvider(model=self.model, config_path=path)
         return self._providers[key]

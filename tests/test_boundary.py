@@ -137,7 +137,7 @@ def test_the_neutral_manifest_describes_the_project_to_be_built(manifest):
     assert NeutralManifestSchema().load(payload)
 
 
-# --- leak detection (advisory, never a gate) --------------------------------
+# --- leak detection (Dirty annotates; Border enforces) ----------------------
 
 
 def test_a_known_original_is_flagged():
@@ -160,7 +160,7 @@ def test_clean_prose_is_not_flagged():
 
 
 def test_findings_are_appended_rather_than_blocking():
-    """Step 1 records leaks; Border enforces later (Q3)."""
+    """Dirty annotates without blocking; Border is the enforcement gate (Q3)."""
     annotated = annotate_border_review("# Spec\n\nBody.", ["BORDER-REVIEW: something"])
     assert "# Spec" in annotated
     assert "BORDER-REVIEW" in annotated
@@ -674,7 +674,7 @@ def test_the_lifted_prose_corpus_ignores_findings_with_no_source():
     """A `missing` finding has no file to quote, so the controller stores the agent's own
     English as its excerpt. Feeding that back made the scanner flag the specification for
     restating our own words - a false positive on every run reporting something missing."""
-    from packages.agents.dirt_team.spec_synthesizer_agent import _evidence_excerpts
+    from packages.modules.border import evidence_excerpts
 
     report = {
         "setup_and_run": [
@@ -700,13 +700,13 @@ def test_the_lifted_prose_corpus_ignores_findings_with_no_source():
             },
         ]
     }
-    corpus = _evidence_excerpts(report)
+    corpus = evidence_excerpts(report)
     assert corpus == ("Execute the launcher module to open the calculator window.",)
 
 
 def test_a_restated_missing_finding_is_no_longer_flagged_as_lifted():
     """End to end for the same defect: the exact sentence pair from the live run."""
-    from packages.agents.dirt_team.spec_synthesizer_agent import _evidence_excerpts
+    from packages.modules.border import evidence_excerpts
 
     sentence = "The documentation does not provide instructions for setting up and executing the project."
     report = {
@@ -724,12 +724,12 @@ def test_a_restated_missing_finding_is_no_longer_flagged_as_lifted():
         ]
     }
     spec = f"- **Setup and Execution**: {sentence} (Evidence: EV-195)."
-    assert _content(spec, _evidence_excerpts(report)) == []
+    assert _content(spec, evidence_excerpts(report)) == []
 
 
 def test_real_lifted_prose_is_still_caught_after_the_fix():
     """The fix must not blunt the rule for excerpts that DO have a source."""
-    from packages.agents.dirt_team.spec_synthesizer_agent import _evidence_excerpts
+    from packages.modules.border import evidence_excerpts
 
     report = {
         "features": [
@@ -746,5 +746,5 @@ def test_real_lifted_prose_is_still_caught_after_the_fix():
         ]
     }
     spec = "Setup: run the application by executing the main entry point from the project root."
-    findings = _content(spec, _evidence_excerpts(report))
+    findings = _content(spec, evidence_excerpts(report))
     assert [f.kind for f in findings] == ["verbatim source-document prose"]

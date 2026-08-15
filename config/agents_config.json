@@ -55,6 +55,13 @@
       "retry_profile": "strict_json_retry",
       "max_validation_retries": 6,
       "_why": "Grades plans it did not write, dirty-side against the original. Same model as the planner by decision: Flash-Lite's ~500/day free tier is what makes a multi-round loop affordable at all. Accepted cost is shared blind spots, mitigated by a critique-first prompt. Swapping it to a stronger model is one line here."
+    },
+    "border_gate": {
+      "model": "gemini/gemini-3.5-flash-lite",
+      "profile": "strict_json",
+      "retry_profile": "strict_json_retry",
+      "max_validation_retries": 6,
+      "_why": "Adjudicates soft Border findings (DESCRIPTIVE/UNCERTAIN). Hard leaks never reach the model. Prefer a careful dismiss-or-fail judgement over throughput."
     }
   }
 }

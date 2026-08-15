@@ -19,12 +19,12 @@ crosses.
 
 ## Status
 
-**Built** — the dirty team, end to end: ingest → index → plan → analyse → specification.
-Four analysis stages, each planned by an agent and scored by a separate judge. Every
-artifact is schema-validated before storage, and crossing artifacts are scanned for leaks.
+**Built** — Dirty (ingest → index → plan → analyse → specification) and Border.
+Dirty annotates `BORDER-REVIEW` notes; Border re-scans, asks the configured
+`border_gate` model to adjudicate soft findings, auto-fails hard leaks, writes
+`border_verdict.json`, and exits non-zero when anything remains.
 
-**Not built** — Border (leak findings are recorded as advisory `BORDER-REVIEW` notes, not
-enforced) and the clean team.
+**Not built** — the clean team.
 
 ## Run it
 
@@ -35,20 +35,26 @@ cp .env.example .env                               # add your Gemini API key
 python main.py https://github.com/owner/project
 ```
 
-Output lands in `artifacts/<repo>-<hash>/` — `specification.md` plus every intermediate
-artifact. `--stub` runs the whole pipeline without calling a model or spending credits.
+Output lands in `artifacts/<repo>-<hash>/` — `specification.md`, `border_verdict.json`,
+plus every intermediate artifact. `--stub` runs the whole pipeline without calling a
+model. `--skip-border` keeps Dirty's advisory notes but skips enforcement.
+
+Exit codes: `0` ok, `2` configuration, `3` Border refused.
 
 ## Layout
 
 ```
-main.py                    CLI entry point
+main.py                    CLI entry point (Dirty → Border)
 config/                    agent → model mapping, model profiles
-packages/agents/           planning (+ judge), dirt_team analysis agents, base agent
-packages/modules/boundary/ the alias map, neutralisation, leak scanners
+packages/agents/           planning, dirt_team, border_team, base agent
+packages/modules/boundary/ alias map, neutralisation, leak scanners
+packages/modules/border/   enforcement gate and verdict
 packages/modules/          ingesting, indexing, storing, supervising, skills
 iatin_vault/               design notes — why things are the way they are
 tests/                     pytest
 ```
 
 Models are reached through **AgentProvider** (prompt → text), never a provider SDK
-directly. Which agent uses which model lives in `config/agents_config.json`.
+directly. Which agent uses which model lives in `config/agents_config.json`. Border's
+gate uses scanners for hard leaks and the configured `border_gate` model to adjudicate
+soft (DESCRIPTIVE / UNCERTAIN) findings.

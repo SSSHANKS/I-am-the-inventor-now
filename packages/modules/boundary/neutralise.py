@@ -8,8 +8,8 @@ Two jobs:
 2. Notice when something original survived anyway, and mark it `BORDER-REVIEW`.
 
 Job 2 is deliberately **not** an enforcement gate. Nothing here rejects, blocks, or
-raises on a suspected leak - it annotates. Enforcement belongs to Border, which is a
-later step (CLAUDE.md section 1, decided in Q3).
+raises on a suspected leak - it annotates. Enforcement belongs to
+`packages.modules.border` (Q3).
 """
 
 import re
@@ -869,9 +869,9 @@ def annotate_border_review(
         f"## {BORDER_REVIEW}",
         "",
         "Automated scanning flagged the following as possibly originating from the "
-        "analysed source. This is advisory: no enforcement gate runs in Step 1, and the "
-        "NAME-SHAPED / DESCRIPTIVE / UNCERTAIN readings are heuristic hints for review, "
-        "not decisions. Nothing here has been suppressed.",
+        "analysed source. Dirty records these for visibility; Border enforces them "
+        "separately via border_verdict.json. NAME-SHAPED / DESCRIPTIVE / UNCERTAIN "
+        "readings are heuristic hints, not dismissals. Nothing here has been suppressed.",
         "",
     ]
 

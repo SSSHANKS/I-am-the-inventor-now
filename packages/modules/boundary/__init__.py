@@ -1,8 +1,8 @@
 """The clean-room boundary layer (CLAUDE.md section 2).
 
 Holds the private original -> neutral map and builds the neutral artifacts that cross
-to the clean team. Detection of residual leaks is advisory only; enforcement is
-Border's job, later.
+to the clean team. Detection of residual leaks is advisory here; enforcement lives in
+`packages.modules.border` / the Border team.
 """
 
 from packages.modules.boundary.alias_map import (

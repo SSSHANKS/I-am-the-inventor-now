@@ -17,6 +17,7 @@ import json
 import pytest
 
 from packages.agents.base_agent import StubTextClient
+from packages.agents.border_team import BorderGateAgent
 from packages.agents.dirt_team import (
     BehaviorAnalyzerAgent,
     CodeFactsAgent,
@@ -66,6 +67,26 @@ class ScriptedModel:
                         "completeness": 5,
                     },
                     "actions": ["spend a second task on the validation rule"],
+                }
+            )
+
+        if "<border_findings>" in prompt:
+            try:
+                block = prompt.split("<border_findings>", 1)[1].split("</border_findings>", 1)[0]
+                findings = json.loads(block)
+            except (IndexError, json.JSONDecodeError):
+                findings = []
+            return json.dumps(
+                {
+                    "decisions": [
+                        {
+                            "finding_id": item.get("finding_id", "BF-000"),
+                            "decision": "dismiss",
+                            "rationale": "integration stub dismisses soft findings",
+                        }
+                        for item in findings
+                        if isinstance(item, dict)
+                    ]
                 }
             )
 
@@ -229,8 +250,24 @@ def test_the_pipeline_runs_end_to_end_and_produces_a_specification(pipeline):
     )
     storage.save_text("specification.md", specification)
 
+    catalogue_artifact = build_evidence_catalogue(
+        alias_map, p["code_index"], p["doc_index"]
+    )
+    p["agent"](BorderGateAgent).enforce(
+        storage=storage,
+        alias_map=alias_map,
+        specification=specification,
+        documentation_report=documentation_report,
+        code_facts_report=code_facts_report,
+        behavior_report=behavior_report,
+        evidence_catalogue=catalogue_artifact,
+        neutral_manifest=neutral_manifest(p["manifest"], alias_map),
+    )
+
     # the pipeline completed and produced a real document
     assert storage.exists("specification.md")
+    assert storage.exists("border_verdict.json")
+    assert storage.read_json("border_verdict.json")["status"] == "pass"
     assert specification.startswith("# Specification")
     assert len(specification.splitlines()) > 20
 
