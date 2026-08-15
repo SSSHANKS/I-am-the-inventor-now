@@ -21,8 +21,9 @@ crosses.
 
 **Built** — Dirty (ingest → index → plan → analyse → specification) and Border.
 Dirty annotates `BORDER-REVIEW` notes; Border re-scans, asks the configured
-`border_gate` model to adjudicate soft findings, auto-fails hard leaks, writes
-`border_verdict.json`, and exits non-zero when anything remains.
+`border_gate` model to adjudicate soft findings, auto-fails hard leaks, and on
+refusal asks Dirty to rewrite (`--border-max-repairs`, default 2) before exiting
+non-zero. Intermediate fail/repair specs and `border_verdict.round-N.json` are kept.
 
 **Not built** — the clean team.
 
@@ -39,7 +40,9 @@ Output lands in `artifacts/<repo>-<hash>/` — `specification.md`, `border_verdi
 plus every intermediate artifact. `--stub` runs the whole pipeline without calling a
 model. `--skip-border` keeps Dirty's advisory notes but skips enforcement.
 
-Exit codes: `0` ok, `2` configuration, `3` Border refused.
+Exit codes: `0` ok, `2` configuration, `3` Border refused after repairs.
+
+`--border-max-repairs N` controls how many Dirty rewrites Border may request (default 2).
 
 ## Layout
 

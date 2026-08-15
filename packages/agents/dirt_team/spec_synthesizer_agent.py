@@ -124,6 +124,22 @@ clean specification is better than a rich, contaminated one.
   one supports, in behavioural terms. It is a table of claims, not of locations.
 """.strip()
 
+REPAIR_INSTRUCTION = """
+[Agent Role]
+You repair a behavioural specification that Border refused because original material
+leaked into it. You are still Dirty-side, but the document you produce must be able to
+cross.
+
+[Task]
+- Rewrite the specification so every failed finding is gone.
+- Prefer neutral role language ("the build configuration", "Component A", "Operation E").
+- Keep the same section structure, evidence ids (EV-###), and behavioural content.
+- Do not invent new behaviour, APIs, or requirements.
+- Do not mention Border, repair, or the words that were flagged as leaks.
+- Do not append a BORDER-REVIEW section; the controller re-annotates after you finish.
+- Return ONLY Markdown. No code fences around the document.
+""".strip()
+
 SPEC_OUTPUT_FIELDS: tuple[str, ...] = (
     "source_snapshot",
     "scope",
@@ -288,6 +304,36 @@ class SpecSynthesizerAgent(BaseAgent):
             alias_map,
             evidence_excerpts(documentation_report, code_facts_report, behavior_report),
         )
+
+    def repair(
+        self,
+        specification: str,
+        failing_findings: list[dict[str, Any]],
+        alias_map: AliasMap,
+        *,
+        documentation_report: str | dict[str, Any] | None = None,
+        code_facts_report: str | dict[str, Any] | None = None,
+        behavior_report: str | dict[str, Any] | None = None,
+        repo_local_path: str | None = None,
+    ) -> str:
+        """Rewrite a Border-refused specification so the named leaks are gone.
+
+        Applies a deterministic scrub of failed originals first, then asks the model to
+        restore natural prose without reintroducing them. Re-annotates via `_reviewed`.
+        """
+        from packages.agents.border_team.repair_loop import scrub_failed_originals
+
+        corpus = evidence_excerpts(documentation_report, code_facts_report, behavior_report)
+        prepared = scrub_failed_originals(specification, failing_findings, alias_map)
+        content = self.run(
+            instruction=REPAIR_INSTRUCTION,
+            task_instruction=build_repair_task_instruction(prepared, failing_findings),
+            agent_name="Spec Synthesizer Agent [border repair]",
+            repo_local_path=repo_local_path,
+            recorder_scope="agents",
+            recorder_sub_scope="Spec Synthesizer Agent [border repair]",
+        )
+        return self._reviewed(self.require_content(content), alias_map, corpus)
 
     def _reviewed(
         self,
@@ -686,6 +732,37 @@ Each item must contain source_ref, heading, and markdown. Set source_ref to null
 """.strip()
 
     return _build_narrow_user_prompt
+
+
+def build_repair_task_instruction(
+    specification: str,
+    failing_findings: list[dict[str, Any]],
+) -> str:
+    findings_payload = [
+        {
+            "finding_id": item.get("finding_id"),
+            "original": item.get("original"),
+            "alias": item.get("alias"),
+            "kind": item.get("kind"),
+            "classifications": item.get("classifications"),
+            "examples": item.get("examples"),
+            "rationale": item.get("rationale"),
+            "summary": item.get("summary"),
+        }
+        for item in failing_findings
+    ]
+    return f"""
+<failing_findings>
+{json.dumps(findings_payload, ensure_ascii=False, indent=2)}
+</failing_findings>
+
+<specification_under_repair>
+{specification.strip()}
+</specification_under_repair>
+
+Rewrite the specification so none of the failed originals remain. Keep EV-### evidence
+ids and the behavioural meaning. Return the full Markdown document.
+""".strip()
 
 
 def build_task_instruction(

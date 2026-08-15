@@ -4,7 +4,9 @@
 
 Clones the repository, indexes it, plans and runs four analysis stages, writes a
 behavioural specification, then Border judges whether anything original leaked.
-A failed Border verdict exits non-zero so Clean never receives a contaminated spec.
+A failed Border verdict triggers Dirty repairs (rewrite the leaking passages) and
+re-gates until it passes or ``--border-max-repairs`` is exhausted. Only then does the
+pipeline exit non-zero so Clean never receives a contaminated spec.
 
 The specification is a CROSSING artifact: it describes what the project does, never how
 the original expressed it (CLAUDE.md section 2). Use `--stub` to exercise the whole
@@ -23,7 +25,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from config import ConfigError, load_environment, load_settings, setup_logging
 from packages.agents.base_agent import StubTextClient
-from packages.agents.border_team import BorderGateAgent, load_plan_artifacts
+from packages.agents.border_team import (
+    DEFAULT_MAX_REPAIRS,
+    BorderGateAgent,
+    gate_with_repairs,
+    load_plan_artifacts,
+)
 from packages.agents.dirt_team import (
     BehaviorAnalyzerAgent,
     CodeFactsAgent,
@@ -86,6 +93,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--skip-border",
         action="store_true",
         help="run Dirty only - record BORDER-REVIEW notes but do not enforce a verdict",
+    )
+    parser.add_argument(
+        "--border-max-repairs",
+        type=int,
+        default=DEFAULT_MAX_REPAIRS,
+        help=(
+            "how many times Dirty may rewrite the specification after Border refuses "
+            f"(default: {DEFAULT_MAX_REPAIRS}; 0 means gate once with no repair)"
+        ),
     )
     return parser.parse_args(argv)
 
@@ -219,9 +235,7 @@ def run(args: argparse.Namespace) -> Path:
     storage.save_private("alias_map.json", alias_map.to_private_dict())
     log.info("stage complete: specification")
 
-    # --- Border ---------------------------------------------------------------
-    # Dirty annotated leaks for visibility above. Border re-scans crossing artifacts
-    # (body only — the advisory appendix is stripped) and refuses the run on any finding.
+    # --- Border (+ repair loop) -----------------------------------------------
     leaks = _rendered_findings(specification)
     if leaks:
         log.warning("specification carries %d Dirty BORDER-REVIEW finding(s)", leaks)
@@ -230,10 +244,27 @@ def run(args: argparse.Namespace) -> Path:
         log.warning("Border skipped (--skip-border); crossing artifacts were not gated")
     else:
         plans = load_plan_artifacts(storage, plan_files)
-        BorderGateAgent(**agent_kwargs("border_gate")).enforce(
+        synthesizer = SpecSynthesizerAgent(**agent_kwargs("spec_synthesizer"))
+        border = BorderGateAgent(**agent_kwargs("border_gate"))
+
+        def repair(spec_text: str, failing: list) -> str:
+            return synthesizer.repair(
+                spec_text,
+                failing,
+                alias_map,
+                documentation_report=documentation_report,
+                code_facts_report=code_facts_report,
+                behavior_report=behavior_report,
+                repo_local_path=manifest.repo_local_path,
+            )
+
+        specification, _verdict = gate_with_repairs(
+            border=border,
+            repair=repair,
             storage=storage,
             alias_map=alias_map,
             specification=specification,
+            max_repairs=args.border_max_repairs,
             documentation_report=documentation_report,
             code_facts_report=code_facts_report,
             behavior_report=behavior_report,
@@ -242,6 +273,7 @@ def run(args: argparse.Namespace) -> Path:
             neutral_manifest=neutral_manifest_artifact,
             repo_local_path=manifest.repo_local_path,
         )
+        spec_path = storage.save_text("specification.md", specification)
         log.info("stage complete: border")
 
     if not args.keep_clone:
@@ -270,6 +302,25 @@ def _stubbed_reply(prompt: str) -> str:
                 "actions": ["stubbed run - no real critique"],
             }
         )
+
+    if "<failing_findings>" in prompt and "<specification_under_repair>" in prompt:
+        # Deterministic stub repair: drop each failed original from the body.
+        try:
+            findings = json.loads(
+                prompt.split("<failing_findings>", 1)[1].split("</failing_findings>", 1)[0]
+            )
+            body = prompt.split("<specification_under_repair>", 1)[1].split(
+                "</specification_under_repair>", 1
+            )[0].strip()
+        except (IndexError, json.JSONDecodeError):
+            return "# Specification\n\nStubbed repaired specification.\n"
+        for item in findings:
+            if not isinstance(item, dict):
+                continue
+            original = item.get("original")
+            if isinstance(original, str) and original:
+                body = body.replace(original, item.get("alias") or "the referenced element")
+        return body
 
     if "<border_findings>" in prompt:
         # Soft findings only reach this prompt. Stub dismisses them so hollow pipeline
