@@ -76,22 +76,121 @@ See [the docs](https://example.invalid/docs) for more.
 """
 
 
+SAMPLE_JS = """\
+import { load } from './store.js';
+
+export class WidgetView {
+  constructor(root) {
+    this.root = root;
+  }
+
+  render(name) {
+    return load(name);
+  }
+}
+
+export function createView(root) {
+  return new WidgetView(root);
+}
+
+if (require.main === module) {
+  createView('.');
+}
+"""
+
+SAMPLE_JAVA = """\
+package com.example.widgets;
+
+import java.util.List;
+
+public class WidgetService {
+  public List<String> names() {
+    return List.of("a", "b");
+  }
+
+  public static void main(String[] args) {
+    new WidgetService().names();
+  }
+}
+"""
+
+SAMPLE_CPP = """\
+#include <vector>
+#include "widget.h"
+
+namespace widgets {
+
+class WidgetBox {
+ public:
+  void store(int value) {}
+};
+
+int main() {
+  WidgetBox box;
+  box.store(1);
+  return 0;
+}
+
+}
+"""
+
+SAMPLE_NOTEBOOK = """\
+{
+  "cells": [
+    {
+      "cell_type": "code",
+      "metadata": {},
+      "source": [
+        "class NotebookStore:\\n",
+        "    def fetch(self, name):\\n",
+        "        return name\\n",
+        "\\n",
+        "def build_notebook_store():\\n",
+        "    return NotebookStore()\\n"
+      ]
+    }
+  ],
+  "metadata": {
+    "kernelspec": {"language": "python", "name": "python3"},
+    "language_info": {"name": "python"}
+  },
+  "nbformat": 4,
+  "nbformat_minor": 5
+}
+"""
+
+
 @pytest.fixture
 def snapshot(tmp_path):
     """A small on-disk repository snapshot."""
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "store.py").write_text(SAMPLE_MODULE, encoding="utf-8")
+    (tmp_path / "src" / "view.js").write_text(SAMPLE_JS, encoding="utf-8")
+    (tmp_path / "src" / "WidgetService.java").write_text(SAMPLE_JAVA, encoding="utf-8")
+    (tmp_path / "src" / "box.cpp").write_text(SAMPLE_CPP, encoding="utf-8")
+    (tmp_path / "analysis.ipynb").write_text(SAMPLE_NOTEBOOK, encoding="utf-8")
     (tmp_path / "README.md").write_text(SAMPLE_DOC, encoding="utf-8")
     (tmp_path / "config.json").write_text('{"limit": 5, "name": "sample"}', encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "sample"\n', encoding="utf-8")
+    (tmp_path / "Dockerfile").write_text("FROM python:3.13\nRUN pip install sample\n", encoding="utf-8")
     (tmp_path / "notes.bin").write_bytes(b"\x00\x01")
-    # classified as code, but no indexer handles it yet - only .py and .json do
-    (tmp_path / "widget.js").write_text("export const widget = 1;\n", encoding="utf-8")
     return tmp_path
 
 
 @pytest.fixture
 def manifest(snapshot):
-    files = ["src/store.py", "README.md", "config.json", "notes.bin", "widget.js"]
+    files = [
+        "src/store.py",
+        "src/view.js",
+        "src/WidgetService.java",
+        "src/box.cpp",
+        "analysis.ipynb",
+        "README.md",
+        "config.json",
+        "pyproject.toml",
+        "Dockerfile",
+        "notes.bin",
+    ]
     return SourceManifest(
         source_type="url_git_repo",
         repo_url="https://example.invalid/owner/original-project.git",

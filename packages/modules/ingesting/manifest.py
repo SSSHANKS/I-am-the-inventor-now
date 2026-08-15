@@ -12,7 +12,27 @@ from enum import StrEnum
 from pathlib import Path
 
 DOCUMENTATION_EXTENSIONS = frozenset({"md", "rst", "txt"})
-CODE_EXTENSIONS = frozenset({"py", "ipynb", "cpp", "c", "h", "hpp", "js", "ts", "java"})
+#: Extensions the code indexer can actually analyse. Keep this set in lockstep with
+#: `packages.modules.indexing.indexers.CODE_HANDLERS` / `PROFILE_BY_SUFFIX`.
+CODE_EXTENSIONS = frozenset(
+    {
+        "py",
+        "ipynb",
+        "js",
+        "mjs",
+        "cjs",
+        "jsx",
+        "ts",
+        "tsx",
+        "java",
+        "c",
+        "cc",
+        "cxx",
+        "cpp",
+        "h",
+        "hpp",
+    }
+)
 CONFIG_FILES = frozenset(
     {
         "Dockerfile",

@@ -12,7 +12,8 @@ def test_code_index_finds_the_structure(reader, manifest):
     index = SourceCodeIndexer(reader).index(manifest)
     assert index["errors"] == []
     assert "src/store.py" in index["files_indexed"]
-    assert {c["name"] for c in index["classes"]} == {"WidgetStore"}
+    class_names = {c["name"] for c in index["classes"]}
+    assert "WidgetStore" in class_names
     assert "build_store" in {f["qualified_name"] for f in index["functions"]}
     assert "WidgetStore.load" in {f["qualified_name"] for f in index["functions"]}
 
@@ -39,16 +40,52 @@ def test_json_configuration_is_indexed(reader, manifest):
     assert set(configs[0]["top_level_keys"]) == {"limit", "name"}
 
 
-def test_code_files_without_an_indexer_are_recorded_not_dropped(reader, manifest):
-    """`CODE_EXTENSIONS` admits nine languages; only .py and .json have an indexer.
+def test_classified_code_languages_are_indexed_not_skipped(reader, manifest):
+    """Every extension ingest puts on the code list must produce index entries.
 
-    The rest must show up under files_skipped so a later stage can see the gap rather
-    than mistake a partial index for a complete one.
+    The old gap left .js/.java/.cpp/.ipynb under files_skipped while the manifest
+    claimed they were analysable - planning then starved on non-Python repos.
     """
     index = SourceCodeIndexer(reader).index(manifest)
-    skipped = {s["file"]: s["reason"] for s in index["files_skipped"]}
-    assert "widget.js" in skipped
-    assert "unsupported_extension" in skipped["widget.js"]
+    assert index["files_skipped"] == [], index["files_skipped"]
+    assert index["errors"] == [], index["errors"]
+
+    indexed = set(index["files_indexed"])
+    assert {
+        "src/store.py",
+        "src/view.js",
+        "src/WidgetService.java",
+        "src/box.cpp",
+        "analysis.ipynb",
+        "config.json",
+        "pyproject.toml",
+        "Dockerfile",
+    } <= indexed
+
+    class_names = {item["name"] for item in index["classes"]}
+    assert {"WidgetStore", "WidgetView", "WidgetService", "WidgetBox", "NotebookStore"} <= class_names
+
+    function_names = {item["name"] for item in index["functions"]}
+    assert {"createView", "build_notebook_store"} <= function_names
+
+    assert any(item["file"] == "src/view.js" for item in index["entrypoints"])
+    assert any(item["file"] == "src/WidgetService.java" for item in index["entrypoints"])
+    assert any(item["file"] == "src/box.cpp" for item in index["entrypoints"])
+
+    toml = [c for c in index["configs"] if c["file"] == "pyproject.toml"]
+    assert toml and "project" in toml[0]["top_level_keys"]
+    docker = [c for c in index["configs"] if c["file"] == "Dockerfile"]
+    assert docker and "FROM" in docker[0]["top_level_keys"]
+
+
+def test_code_extensions_and_handlers_stay_aligned():
+    """Classify and index must agree on what 'code' means - no silent skips."""
+    from packages.modules.indexing.indexers import resolve_code_handler
+    from packages.modules.ingesting import CODE_EXTENSIONS
+
+    for extension in sorted(CODE_EXTENSIONS):
+        handler = resolve_code_handler(f"sample.{extension}")
+        assert handler is not None, f".{extension} is classified as code but has no indexer"
 
 
 def test_ignored_files_never_reach_the_indexer(reader, manifest):

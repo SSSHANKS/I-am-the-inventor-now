@@ -8,9 +8,20 @@ from packages.modules.skills.reading import Reader
 def index_python_file(relative_path: str, result: dict[str, Any], source_reader: Reader) -> None:
     content = source_reader.read_file(relative_path)
     lines = content.splitlines()
+    index_python_source(relative_path, result, content, lines)
+
+
+def index_python_source(
+    relative_path: str,
+    result: dict[str, Any],
+    content: str,
+    lines: list[str],
+) -> None:
+    """Index Python source already loaded in memory (files and notebook cells)."""
     tree = ast.parse(content, filename=relative_path)
 
-    result["files_indexed"].append(relative_path)
+    if relative_path not in result["files_indexed"]:
+        result["files_indexed"].append(relative_path)
     result["imports"].extend(_extract_imports(relative_path, tree, lines))
     result["classes"].extend(_extract_classes(relative_path, tree, lines))
     result["functions"].extend(_extract_functions(relative_path, tree, lines))

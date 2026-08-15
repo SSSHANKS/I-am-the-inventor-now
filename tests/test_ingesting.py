@@ -19,6 +19,12 @@ def test_files_are_split_by_role():
     assert result["ignored"] == ("logo.png",)
 
 
+def test_javascript_variants_count_as_code():
+    result = classify_files(["a.jsx", "b.tsx", "c.mjs", "d.cjs", "e.cc"])
+    assert result["code"] == ("a.jsx", "b.tsx", "c.mjs", "d.cjs", "e.cc")
+    assert result["ignored"] == ()
+
+
 def test_config_files_count_as_code_even_without_a_code_extension():
     assert classify_files(["requirements.txt"])["code"] == ("requirements.txt",)
     # ...while a plain .txt is documentation

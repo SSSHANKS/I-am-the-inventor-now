@@ -24,7 +24,7 @@ BORDER_REVIEW = "BORDER-REVIEW"
 # Shapes that betray an original even when no name is recognisable: a path with a
 # source extension, or a bare file:line reference.
 _PATH_LIKE = re.compile(
-    r"\b[\w./\\-]+\.(?:py|js|ts|java|c|cpp|h|hpp|ipynb|md|rst|txt|json|toml|yaml|yml)\b",
+    r"\b[\w./\\-]+\.(?:py|js|mjs|cjs|jsx|ts|tsx|java|c|cc|cxx|cpp|h|hpp|ipynb|md|rst|txt|json|toml|yaml|yml)\b",
     re.IGNORECASE,
 )
 _FILE_LINE = re.compile(r"\b[\w./\\-]+:\d+(?:-\d+)?\b")
