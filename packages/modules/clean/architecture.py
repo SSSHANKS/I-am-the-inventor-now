@@ -300,6 +300,7 @@ def validate_architecture(
     compatibility_mode: str | None = None,
 ) -> dict[str, Any]:
     """Validate references, traceability, and the component dependency graph."""
+    semantic_diagnostics: list[str] = []
     statements = requirement_statements(specification)
     declared = set(statements)
     behavior_ids = {item for item in declared if not item.startswith("TC-")}
@@ -373,11 +374,14 @@ def validate_architecture(
         for capability in capabilities.values()
         for requirement_id in capability["requirement_ids"]
     }
-    _require_complete_allocation(
-        behavior_ids,
-        allocated_behavior,
-        "capabilities",
-    )
+    try:
+        _require_complete_allocation(
+            behavior_ids,
+            allocated_behavior,
+            "capabilities",
+        )
+    except CleanArchitectureError as exc:
+        semantic_diagnostics.append(str(exc))
     allocated_scenarios = {
         scenario_id
         for capability in capabilities.values()
@@ -388,11 +392,14 @@ def validate_architecture(
         scenario_ids,
         "capability scenario",
     )
-    _require_complete_allocation(
-        scenario_ids,
-        allocated_scenarios,
-        "capability scenarios",
-    )
+    try:
+        _require_complete_allocation(
+            scenario_ids,
+            allocated_scenarios,
+            "capability scenarios",
+        )
+    except CleanArchitectureError as exc:
+        semantic_diagnostics.append(str(exc))
     referenced_components: set[str] = set()
     for capability in capabilities.values():
         component_ids = _unique_references(
@@ -429,11 +436,14 @@ def validate_architecture(
         for component in components.values()
         for requirement_id in component["requirement_ids"]
     }
-    _require_complete_allocation(
-        behavior_ids,
-        allocated_components,
-        "components",
-    )
+    try:
+        _require_complete_allocation(
+            behavior_ids,
+            allocated_components,
+            "components",
+        )
+    except CleanArchitectureError as exc:
+        semantic_diagnostics.append(str(exc))
     component_dependencies: dict[str, set[str]] = {}
     for component_id, component in components.items():
         dependencies = _unique_references(
@@ -499,8 +509,19 @@ def validate_architecture(
             set(components),
             f"proposal {proposal['proposal_id']} components",
         )
-    _validate_behavior_rules(architecture, statements)
-    _validate_observable_auxiliary_contracts(architecture)
+    for validator, args in (
+        (_validate_behavior_rules, (architecture, statements)),
+        (_validate_observable_auxiliary_contracts, (architecture,)),
+    ):
+        try:
+            validator(*args)
+        except CleanArchitectureError as exc:
+            semantic_diagnostics.append(str(exc))
+    if semantic_diagnostics:
+        raise CleanArchitectureError(
+            "Architecture has multiple semantic defects: "
+            + " | ".join(dict.fromkeys(semantic_diagnostics))
+        )
     return architecture
 
 

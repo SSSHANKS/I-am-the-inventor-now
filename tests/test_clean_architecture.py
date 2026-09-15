@@ -148,6 +148,40 @@ def test_auxiliary_observer_behavior_requires_a_separate_contract():
     validate_architecture(architecture, specification)
 
 
+def test_architecture_reports_allocation_and_observer_defects_together():
+    specification = SPECIFICATION.replace(
+        "Return a greeting for the supplied name.",
+        "Specific auxiliary signals notify observers after lifecycle operations.",
+    )
+    architecture = _architecture()
+    architecture["capabilities"][0]["requirement_ids"] = []
+    architecture["contracts"][0]["behavior_rules"] = [
+        {
+            "aspect": "state",
+            "statement": (
+                "Specific auxiliary signals notify observers after lifecycle operations."
+            ),
+            "requirement_ids": ["FR-001"],
+            "source": "specification",
+            "evidence": [
+                {
+                    "requirement_id": "FR-001",
+                    "excerpt": (
+                        "Specific auxiliary signals notify observers after lifecycle operations."
+                    ),
+                }
+            ],
+        }
+    ]
+
+    with pytest.raises(CleanArchitectureError) as captured:
+        validate_architecture(architecture, specification)
+
+    assert "does not allocate requirements to capabilities:" in str(captured.value)
+    assert "FR-001" in str(captured.value)
+    assert "jointly claimed" in str(captured.value)
+
+
 def test_auxiliary_observer_contract_may_use_a_shared_capability_component():
     specification = SPECIFICATION.replace(
         "Return a greeting for the supplied name.",
