@@ -25,7 +25,11 @@ from packages.modules.clean.adapters import (
     project_first_planning_policy,
     select_runtime_adapter,
 )
-from packages.modules.clean.architecture import normalise_architecture, validate_architecture
+from packages.modules.clean.architecture import (
+    normalise_architecture,
+    normalise_behavior_rule_evidence,
+    validate_architecture,
+)
 from packages.modules.clean.behavior import (
     BehaviorProbeExecutor,
     validate_behavior_probe_suite,
@@ -737,6 +741,9 @@ class CleanRunner:
             try:
                 architecture = CleanArchitectureSchema().load(architecture)
                 architecture = normalise_architecture(architecture)
+                architecture = normalise_behavior_rule_evidence(
+                    architecture, specification
+                )
                 return validate_architecture(
                     architecture,
                     specification,

@@ -95,6 +95,67 @@ def normalise_architecture(architecture: dict[str, Any]) -> dict[str, Any]:
     return normalised
 
 
+def normalise_behavior_rule_evidence(
+    architecture: dict[str, Any],
+    specification: str,
+) -> dict[str, Any]:
+    """Remove only misattributed entries from otherwise grounded mixed rules.
+
+    A rule with no valid evidence remains untouched so validation still rejects it.
+    Contract and component requirement allocation is never changed here.
+    """
+    statements = requirement_statements(specification)
+    for contract in architecture["contracts"]:
+        if "behavior_rules" not in contract:
+            continue
+        rules = contract["behavior_rules"]
+        grounded_statements = {
+            _normalise_evidence_text(rule["statement"])
+            for rule in rules
+            if rule["source"] == "specification"
+            and rule.get("evidence")
+            and all(
+                _evidence_matches_requirement(item, statements)
+                for item in rule["evidence"]
+            )
+        }
+        retained = []
+        for rule in rules:
+            if rule["source"] != "specification":
+                retained.append(rule)
+                continue
+            evidence = rule.get("evidence")
+            if not evidence:
+                retained.append(rule)
+                continue
+            valid_ids = {
+                item["requirement_id"]
+                for item in evidence
+                if _evidence_matches_requirement(item, statements)
+            }
+            claimed = set(rule["requirement_ids"])
+            if valid_ids == claimed:
+                retained.append(rule)
+                continue
+            if valid_ids:
+                rule["requirement_ids"] = [
+                    item for item in rule["requirement_ids"] if item in valid_ids
+                ]
+                rule["evidence"] = [
+                    item for item in evidence if item["requirement_id"] in valid_ids
+                ]
+                retained.append(rule)
+                continue
+            # A model may duplicate one grounded statement into separate rules and
+            # attach an unrelated ID to one copy. Removing only that duplicate is
+            # safer than accepting false provenance. A unique ungrounded rule still
+            # remains present and is rejected by validation.
+            if _normalise_evidence_text(rule["statement"]) not in grounded_statements:
+                retained.append(rule)
+        contract["behavior_rules"] = retained
+    return architecture
+
+
 def _normalise_python_package_surface_names(
     architecture: dict[str, Any],
 ) -> None:
@@ -528,22 +589,6 @@ def validate_architecture(
 def _validate_behavior_rules(architecture: dict[str, Any], statements: dict[str, str]) -> None:
     """Check provenance, not the semantic truth of a model's interpretation."""
     proposals = {item["proposal_id"]: item for item in architecture["proposals"]}
-    def normalize(text: str) -> str:
-        normalized = " ".join(text.split())
-        normalized = re.sub(
-            r"\bEvidence\s*:\s*(?=EV-\d+)",
-            "",
-            normalized,
-            flags=re.IGNORECASE,
-        )
-        normalized = re.sub(
-            r"\(\s*EV-\d+(?:\s*,\s*EV-\d+)*\s*\)",
-            "",
-            normalized,
-            flags=re.IGNORECASE,
-        )
-        normalized = re.sub(r"\s+([,.;:!?])", r"\1", normalized)
-        return " ".join(normalized.split())
     for contract in architecture["contracts"]:
         for rule in contract.get("behavior_rules", []):
             label = f"Contract {contract['contract_id']} {rule['aspect']} behavior rule"
@@ -569,8 +614,7 @@ def _validate_behavior_rules(architecture: dict[str, Any], statements: dict[str,
                     )
                 unmatched = [
                     item["requirement_id"] for item in evidence
-                    if not normalize(item["excerpt"]) or normalize(item["excerpt"]) not in
-                    normalize(statements.get(item["requirement_id"], ""))
+                    if not _evidence_matches_requirement(item, statements)
                 ]
                 if unmatched:
                     raise CleanArchitectureError(
@@ -587,7 +631,9 @@ def _validate_behavior_rules(architecture: dict[str, Any], statements: dict[str,
                     raise CleanArchitectureError(f"{label} requires an existing clean-proposal ledger entry")
                 if contract["component_id"] not in proposal["affected_component_ids"]:
                     raise CleanArchitectureError(f"{label} proposal does not cover its component")
-                if normalize(rule["statement"]) != normalize(proposal["chosen_value"]):
+                if _normalise_evidence_text(rule["statement"]) != _normalise_evidence_text(
+                    proposal["chosen_value"]
+                ):
                     raise CleanArchitectureError(f"{label} must match the proposal's chosen_value")
             else:
                 raise CleanArchitectureError(f"{label} has unknown provenance")
@@ -653,6 +699,8 @@ def _validate_observable_auxiliary_contracts(architecture: dict[str, Any]) -> No
             return bool(participant and action)
 
         if registration_shape(observer_declaration):
+            return True
+        if registration_shape(str(producer.get("declaration", ""))):
             return True
         observer_name = str(observer.get("qualified_name", "")).rsplit(".", 1)[-1]
         if observer_name and re.search(
@@ -724,6 +772,35 @@ def _validate_observable_auxiliary_contracts(architecture: dict[str, Any]) -> No
             "Record an unstated name or shape as a clean "
             "proposal instead of treating ordinary operation handlers as lifecycle observers"
         )
+
+
+def _evidence_matches_requirement(
+    evidence: dict[str, Any],
+    statements: dict[str, str],
+) -> bool:
+    excerpt = _normalise_evidence_text(str(evidence.get("excerpt", "")))
+    statement = _normalise_evidence_text(
+        statements.get(str(evidence.get("requirement_id", "")), "")
+    )
+    return bool(excerpt) and excerpt in statement
+
+
+def _normalise_evidence_text(text: str) -> str:
+    normalized = " ".join(text.split())
+    normalized = re.sub(
+        r"\bEvidence\s*:\s*(?=EV-\d+)",
+        "",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    normalized = re.sub(
+        r"\(\s*EV-\d+(?:\s*,\s*EV-\d+)*\s*\)",
+        "",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    normalized = re.sub(r"\s+([,.;:!?])", r"\1", normalized)
+    return " ".join(normalized.split())
 
 
 def _unique_by_id(

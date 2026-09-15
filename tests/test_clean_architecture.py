@@ -9,6 +9,7 @@ from packages.agents.clean_team import CleanArchitectAgent
 from packages.modules.clean.architecture import (
     CleanArchitectureError,
     normalise_architecture,
+    normalise_behavior_rule_evidence,
     validate_architecture,
 )
 from packages.modules.supervising.schemas import CleanArchitectureSchema
@@ -258,6 +259,94 @@ def test_auxiliary_observer_contract_requires_a_public_interaction_path():
         "greet(name: str, observer: LifecycleObserver) -> str"
     )
     validate_architecture(architecture, specification)
+
+
+def test_observer_interaction_may_be_registered_by_the_producer_contract():
+    specification = SPECIFICATION.replace(
+        "Return a greeting for the supplied name.",
+        "Dedicated lifecycle events notify observers after operations.",
+    )
+    architecture = _architecture()
+    architecture["contracts"][0]["declaration"] = (
+        "class Greeter:\n"
+        "    def greet(self, name: str) -> str: ...\n"
+        "    def register_observer(self, callback: callable) -> None: ..."
+    )
+    architecture["contracts"][0]["behavior_rules"] = [{
+        "aspect": "state",
+        "statement": "Dedicated lifecycle events notify observers after operations.",
+        "requirement_ids": ["FR-001"],
+        "source": "specification",
+        "evidence": [{
+            "requirement_id": "FR-001",
+            "excerpt": "Dedicated lifecycle events notify observers after operations.",
+        }],
+    }]
+    architecture["contracts"].append({
+        "contract_id": "SYM-002",
+        "component_id": "CMP-001",
+        "qualified_name": "greeting.LifecycleObserver",
+        "kind": "class",
+        "declaration": (
+            "class LifecycleObserver:\n"
+            "    def update(self, event: object) -> None: ..."
+        ),
+        "visibility": "public",
+        "requirement_ids": ["FR-001"],
+    })
+
+    validate_architecture(architecture, specification)
+
+
+def test_mixed_rule_normalisation_prunes_only_misattributed_evidence():
+    architecture = _architecture()
+    rule = {
+        "aspect": "results",
+        "statement": "Return a greeting for the supplied name.",
+        "requirement_ids": ["FR-001", "EH-001"],
+        "source": "specification",
+        "evidence": [
+            {
+                "requirement_id": "FR-001",
+                "excerpt": "Return a greeting for the supplied name.",
+            },
+            {
+                "requirement_id": "EH-001",
+                "excerpt": "Return a greeting for the supplied name.",
+            },
+        ],
+    }
+    architecture["contracts"][0]["behavior_rules"] = [rule]
+
+    normalise_behavior_rule_evidence(architecture, SPECIFICATION)
+
+    assert rule["requirement_ids"] == ["FR-001"]
+    assert [item["requirement_id"] for item in rule["evidence"]] == ["FR-001"]
+
+
+def test_rule_normalisation_drops_a_misattributed_duplicate_statement():
+    architecture = _architecture()
+    valid_rule = {
+        "aspect": "results",
+        "statement": "Return a greeting for the supplied name.",
+        "requirement_ids": ["FR-001"],
+        "source": "specification",
+        "evidence": [{
+            "requirement_id": "FR-001",
+            "excerpt": "Return a greeting for the supplied name.",
+        }],
+    }
+    duplicate = deepcopy(valid_rule)
+    duplicate["requirement_ids"] = ["EH-001"]
+    duplicate["evidence"] = [{
+        "requirement_id": "EH-001",
+        "excerpt": valid_rule["statement"],
+    }]
+    architecture["contracts"][0]["behavior_rules"] = [valid_rule, duplicate]
+
+    normalise_behavior_rule_evidence(architecture, SPECIFICATION)
+
+    assert architecture["contracts"][0]["behavior_rules"] == [valid_rule]
 
 
 def test_combined_rule_does_not_make_unrelated_requirements_observer_contracts():
