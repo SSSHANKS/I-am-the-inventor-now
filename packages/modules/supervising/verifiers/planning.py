@@ -92,6 +92,7 @@ class PlanVerifier:
         plan: str | dict[str, Any],
         stage: str,
         alias_map: Any | None = None,
+        evidence_catalogue: list[dict[str, Any]] | None = None,
         **_ignored: Any,
     ) -> dict[str, Any]:
         """Return the standard verification result: valid, count, issues.
@@ -117,11 +118,27 @@ class PlanVerifier:
             issues.append(_issue("error", "$.mini_tasks", "Plan contains no mini tasks."))
 
         allowed = OUTPUT_FIELDS_BY_STAGE.get(stage, frozenset())
+        catalogue_by_id = {
+            entry["evidence_id"]: entry
+            for entry in (evidence_catalogue or [])
+            if isinstance(entry, dict) and isinstance(entry.get("evidence_id"), str)
+        }
         seen_task_ids: set[str] = set()
 
         for index, task in enumerate(mini_tasks):
             path = f"$.mini_tasks[{index}]"
-            issues.extend(self._verify_task(task, path, allowed, seen_task_ids, alias_map))
+            issues.extend(
+                self._verify_task(
+                    task,
+                    path,
+                    allowed,
+                    seen_task_ids,
+                    alias_map,
+                    stage,
+                    catalogue_by_id,
+                    evidence_catalogue is not None,
+                )
+            )
 
         issues.extend(self._verify_coverage(payload, mini_tasks, stage, allowed))
 
@@ -225,6 +242,9 @@ class PlanVerifier:
         allowed: frozenset[str],
         seen_task_ids: set[str],
         alias_map: Any | None,
+        stage: str,
+        catalogue_by_id: dict[str, dict[str, Any]],
+        catalogue_supplied: bool,
     ) -> list[dict[str, Any]]:
         issues: list[dict[str, Any]] = []
 
@@ -265,7 +285,16 @@ class PlanVerifier:
                 _issue("error", f"{path}.min_items", "min_items must be a positive integer.")
             )
 
-        issues.extend(self._verify_refs(task, path, alias_map))
+        issues.extend(
+            self._verify_refs(
+                task,
+                path,
+                alias_map,
+                stage,
+                catalogue_by_id,
+                catalogue_supplied,
+            )
+        )
         return issues
 
     def _verify_refs(
@@ -273,6 +302,9 @@ class PlanVerifier:
         task: dict[str, Any],
         path: str,
         alias_map: Any | None,
+        stage: str,
+        catalogue_by_id: dict[str, dict[str, Any]],
+        catalogue_supplied: bool,
     ) -> list[dict[str, Any]]:
         """Every cited evidence id must resolve, and none may repeat within a task."""
         issues: list[dict[str, Any]] = []
@@ -324,6 +356,31 @@ class PlanVerifier:
                         ref_path,
                         f"Evidence {evidence_id!r} does not exist. Cite an id from the "
                         "evidence catalogue; do not invent one.",
+                    )
+                )
+
+            catalogue_entry = catalogue_by_id.get(evidence_id)
+            if catalogue_supplied and catalogue_entry is None:
+                issues.append(
+                    _issue(
+                        "error",
+                        ref_path,
+                        f"Evidence {evidence_id!r} is not available to the {stage} planner.",
+                    )
+                )
+                continue
+            source_type = (catalogue_entry or {}).get("source_type")
+            required_type = {
+                "documentation": "documentation",
+                "code_facts": "code",
+            }.get(stage)
+            if required_type and source_type and source_type != required_type:
+                issues.append(
+                    _issue(
+                        "error",
+                        ref_path,
+                        f"Evidence {evidence_id!r} is {source_type} evidence; "
+                        f"the {stage} stage requires {required_type} evidence.",
                     )
                 )
 

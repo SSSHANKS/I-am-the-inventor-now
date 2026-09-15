@@ -373,9 +373,16 @@ def build_evidence_catalogue(
     notes: list[str] = []
     seen: set[str] = set()
 
-    def add(index: dict[str, Any], collections: dict[str, str]) -> None:
+    def add(
+        index: dict[str, Any],
+        collections: dict[str, str],
+        source_type: str,
+    ) -> None:
         for collection, noun in collections.items():
-            for item in (index.get(collection) or [])[:limit_per_collection]:
+            candidates = list(index.get(collection) or [])
+            if source_type == "code":
+                candidates.sort(key=_code_evidence_priority)
+            for item in candidates[:limit_per_collection]:
                 evidence = item.get("evidence") if isinstance(item, dict) else None
                 if not isinstance(evidence, dict) or not isinstance(evidence.get("file"), str):
                     continue
@@ -388,14 +395,43 @@ def build_evidence_catalogue(
                         "evidence_id": reference,
                         "kind": noun,
                         "about": _neutral_about(item, noun, alias_map, reference, notes),
+                        "source_type": source_type,
+                        "source_role": _source_role(evidence["file"], source_type),
                     }
                 )
 
     if code_index:
-        add(code_index, _CODE_CITABLE)
+        add(code_index, _CODE_CITABLE, "code")
     if doc_index:
-        add(doc_index, _DOC_CITABLE)
+        add(doc_index, _DOC_CITABLE, "documentation")
     return {"entries": entries, "border_review": notes}
+
+
+def _code_evidence_priority(item: Any) -> tuple[int, str, int]:
+    """Put production code before support files, tests, and examples."""
+    evidence = item.get("evidence") if isinstance(item, dict) else None
+    file = str((evidence or {}).get("file") or "").replace("\\", "/").lower()
+    if file.startswith(("src/", "lib/", "app/", "packages/")):
+        rank = 0
+    elif file.startswith(("test/", "tests/")):
+        rank = 2
+    elif file.startswith(("example/", "examples/", "docs/")):
+        rank = 3
+    else:
+        rank = 1
+    return rank, file, int((evidence or {}).get("line_start") or 0)
+
+
+def _source_role(file: str, source_type: str) -> str:
+    if source_type == "documentation":
+        return "documentation"
+    rank = _code_evidence_priority({"evidence": {"file": file}})[0]
+    return {
+        0: "production source",
+        1: "supporting source",
+        2: "test source",
+        3: "example source",
+    }[rank]
 
 
 def evidence_catalogue(

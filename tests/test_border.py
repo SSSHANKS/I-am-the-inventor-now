@@ -131,7 +131,7 @@ def test_hard_identifier_leak_fails_even_if_adjudicator_would_dismiss():
 
 def test_soft_finding_fails_under_strict_policy_without_adjudicator():
     alias_map = _alias_map_with_widget()
-    prose = "The component performs a deep WidgetStore."
+    prose = "# Specification\n\nThe component performs a deep WidgetStore."
     records = review_text("specification.md", prose, alias_map)
     assert records
     if not any(is_soft_finding(r) for r in records):
@@ -143,7 +143,7 @@ def test_soft_finding_fails_under_strict_policy_without_adjudicator():
 
 def test_llm_adjudicator_can_dismiss_soft_findings():
     alias_map = _alias_map_with_widget()
-    prose = "The component performs a deep WidgetStore."
+    prose = "# Specification\n\nThe component performs a deep WidgetStore."
     records = review_text("specification.md", prose, alias_map)
     if not any(is_soft_finding(r) for r in records):
         pytest.skip("phrasing classified as hard; soft path covered elsewhere")
@@ -227,6 +227,56 @@ def test_plan_content_rules_run_at_border():
     )
     assert not verdict.passed
     assert "doc_plan.json" in verdict.failed_artifacts
+
+
+def test_plan_protocol_fields_are_not_scanned_as_repository_prose():
+    alias_map = AliasMap()
+    alias_map.component_alias("scope", kind="function")
+    plan = json.dumps(
+        {
+            "stage": "specification",
+            "mini_tasks": [
+                {
+                    "task_id": "SPEC-001",
+                    "task_type": "define_scope",
+                    "output_field": "scope",
+                    "input_refs": [
+                        {"source": "evidence_catalogue", "evidence_id": "EV-001"}
+                    ],
+                    "requirements": ["Describe the supported behavior"],
+                    "min_items": 1,
+                }
+            ],
+        }
+    )
+    verdict = evaluate_crossing_artifacts(alias_map=alias_map, plans={"spec_plan.json": plan})
+    assert verdict.passed
+
+
+def test_json_wrapped_specification_fails_format_check():
+    wrapped = json.dumps({"document": CLEAN_SPEC})
+    verdict = evaluate_crossing_artifacts(alias_map=AliasMap(), specification=wrapped)
+    assert not verdict.passed
+    assert any(item["kind"] == "invalid artifact format" for item in verdict.findings)
+
+
+def test_separate_catalogue_values_do_not_combine_into_a_fake_command():
+    catalogue = {
+        "entries": [
+            {"evidence_id": "EV-001", "kind": "python", "about": "a documented command"},
+            {
+                "evidence_id": "EV-002",
+                "kind": "a documented command",
+                "about": "Module BJV --numprocesses",
+            },
+        ],
+        "border_review": [],
+    }
+    verdict = evaluate_crossing_artifacts(
+        alias_map=AliasMap(),
+        evidence_catalogue=catalogue,
+    )
+    assert verdict.passed
 
 
 def test_gate_agent_calls_model_and_still_fails_hard_leak(tmp_path):

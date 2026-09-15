@@ -24,6 +24,13 @@ from packages.modules.supervising.verifiers.planning import OUTPUT_FIELDS_BY_STA
 
 log = logging.getLogger(__name__)
 
+_STAGE_EVIDENCE_TYPES = {
+    "documentation": frozenset({"documentation"}),
+    "code_facts": frozenset({"code"}),
+    "behavior": frozenset({"code", "documentation"}),
+    "specification": frozenset({"code", "documentation"}),
+}
+
 
 class PlanningAgent(BaseAgent):
     agent_name = "Planning Agent"
@@ -50,7 +57,7 @@ class PlanningAgent(BaseAgent):
         Extra keyword arguments from the older call style are accepted and ignored.
         """
         log.info("Planning Agent stage -> %s", stage)
-        catalogue = evidence_catalogue or []
+        catalogue = filter_evidence_catalogue(evidence_catalogue or [], stage)
         fields = tuple(allowed_output_fields or OUTPUT_FIELDS_BY_STAGE.get(stage, ()))
         if not catalogue:
             log.warning(
@@ -68,7 +75,11 @@ class PlanningAgent(BaseAgent):
                 ),
                 agent_name=f"Planning Agent [{stage}]",
                 supervisor_policy=PlanningPolicy(alias_map=self.alias_map),
-                supervisor_context={"stage": stage, "alias_map": self.alias_map},
+                supervisor_context={
+                    "stage": stage,
+                    "alias_map": self.alias_map,
+                    "evidence_catalogue": catalogue,
+                },
                 repo_local_path=source_manifest.repo_local_path,
                 recorder_scope="planner",
                 recorder_sub_scope=f"{stage} round",
@@ -119,7 +130,9 @@ def build_task_instruction(
     """
     catalogue_lines = (
         "\n".join(
-            f"- {entry['evidence_id']} ({entry.get('kind', 'evidence')}): {entry.get('about', '')}"
+            f"- {entry['evidence_id']} "
+            f"[{entry.get('source_type', 'evidence')}; {entry.get('source_role', 'source')}] "
+            f"({entry.get('kind', 'evidence')}): {entry.get('about', '')}"
             for entry in evidence_catalogue
         )
         or "- <no evidence available>"
@@ -156,6 +169,20 @@ you cannot.
 
 Return ONLY the JSON plan object.
 """.strip()
+
+
+def filter_evidence_catalogue(
+    catalogue: list[dict[str, str]], stage: str
+) -> list[dict[str, str]]:
+    """Offer each planner only evidence its executing agent can read."""
+    allowed = _STAGE_EVIDENCE_TYPES.get(stage)
+    if not allowed:
+        return list(catalogue)
+    return [
+        entry
+        for entry in catalogue
+        if entry.get("source_type") in allowed or "source_type" not in entry
+    ]
 
 
 def _log_plan(content: str, stage: str) -> None:

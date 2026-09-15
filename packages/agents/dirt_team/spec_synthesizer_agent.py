@@ -333,7 +333,11 @@ class SpecSynthesizerAgent(BaseAgent):
             recorder_scope="agents",
             recorder_sub_scope="Spec Synthesizer Agent [border repair]",
         )
-        return self._reviewed(self.require_content(content), alias_map, corpus)
+        markdown = _normalise_repaired_markdown(
+            self.require_content(content),
+            fallback=prepared,
+        )
+        return self._reviewed(markdown, alias_map, corpus)
 
     def _reviewed(
         self,
@@ -358,6 +362,41 @@ class SpecSynthesizerAgent(BaseAgent):
                 len(findings),
             )
         return annotate_border_review(markdown, findings)
+
+
+def _normalise_repaired_markdown(content: str, *, fallback: str) -> str:
+    """Normalize a model repair, falling back to the deterministic scrub if malformed."""
+    candidate = content.strip()
+    try:
+        payload = json.loads(candidate)
+    except json.JSONDecodeError:
+        payload = None
+
+    if isinstance(payload, str):
+        candidate = payload.strip()
+    elif isinstance(payload, dict):
+        candidate = next(
+            (
+                payload[key].strip()
+                for key in ("document", "markdown", "specification", "content")
+                if isinstance(payload.get(key), str)
+            ),
+            "",
+        )
+    elif payload is not None:
+        candidate = ""
+
+    if candidate.startswith("# "):
+        return candidate
+
+    fallback_markdown = fallback.strip()
+    if not fallback_markdown.startswith("# "):
+        raise ValueError("Deterministically scrubbed specification is not valid Markdown")
+    log.warning(
+        "Border repair model returned a non-Markdown payload; using the deterministic "
+        "scrubbed specification"
+    )
+    return fallback_markdown
 
 
 def _neutral(

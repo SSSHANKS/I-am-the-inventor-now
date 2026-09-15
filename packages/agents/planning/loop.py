@@ -22,6 +22,7 @@ Bounded by construction: `MAX_ROUNDS` model rounds, then the best neutral versio
 if the judge still has notes. Every round is real calls against a free quota.
 """
 
+import json
 import logging
 from dataclasses import dataclass, field
 from typing import Any
@@ -29,6 +30,7 @@ from typing import Any
 from packages.modules.boundary import (
     AliasMap,
     find_residual_originals,
+    scan_content_leaks,
     scrub_identifiers,
 )
 
@@ -37,6 +39,12 @@ log = logging.getLogger(__name__)
 #: Hard cap on planner/judge rounds. Fixed, not configurable: an unbounded "until perfect"
 #: loop is exactly the failure mode this design exists to avoid.
 MAX_ROUNDS = 3
+
+# Values in these fields are the plan protocol, not prose from the analysed project.
+# Scrubbing them can turn a schema-valid plan into one the executor cannot understand
+# (the live Click run changed ``warnings`` and even the ``source`` field name after
+# validation). Keys are likewise structural and are never rewritten.
+_PLAN_CONTROL_FIELDS = frozenset({"stage", "output_field", "source", "evidence_id"})
 
 
 @dataclass
@@ -78,14 +86,86 @@ def enforce_neutrality(plan: str, alias_map: AliasMap) -> tuple[str, bool, list[
     Scrub-then-recheck: a first-pass leak is not fatal, because scrubbing is deterministic
     and usually fixes it. Only a plan still leaking *after* scrubbing is rejected.
     """
-    leaks = find_residual_originals(plan, alias_map)
+    payload = _plan_payload(plan)
+    scan_text = _plan_scan_text(payload) if payload is not None else plan
+    leaks = _plan_leaks(scan_text, alias_map)
     if not leaks:
         return plan, True, [], False
 
     log.warning("Plan leaked %d original(s); scrubbing and re-checking", len(leaks))
-    scrubbed = scrub_identifiers(plan, alias_map)
-    remaining = find_residual_originals(scrubbed, alias_map)
+    scrubbed = (
+        json.dumps(_scrub_plan_value(payload, alias_map), ensure_ascii=False, indent=2)
+        if payload is not None
+        else scrub_identifiers(plan, alias_map)
+    )
+    scrubbed_payload = _plan_payload(scrubbed)
+    scan_text = _plan_scan_text(scrubbed_payload) if scrubbed_payload is not None else scrubbed
+    remaining = _plan_leaks(scan_text, alias_map)
     return scrubbed, not remaining, remaining, True
+
+
+def _plan_leaks(text: str, alias_map: AliasMap) -> list[str]:
+    """Return both known-name and copied-content leaks from plan prose."""
+    return [
+        *find_residual_originals(text, alias_map),
+        *(finding.summary for finding in scan_content_leaks(text)),
+    ]
+
+
+def _scrub_plan_prose(text: str, alias_map: AliasMap) -> str:
+    """Replace content-shaped plan leaks with neutral behavioral phrases."""
+    scrubbed = scrub_identifiers(text, alias_map)
+    replacements = {
+        "command-shaped text": "the required runtime mode",
+        "source-language text": "the described behavior",
+        "verbatim source-document prose": "the supported behavior",
+    }
+    findings = scan_content_leaks(scrubbed)
+    for finding in sorted(findings, key=lambda item: len(item.original), reverse=True):
+        scrubbed = scrubbed.replace(
+            finding.original,
+            replacements.get(finding.kind, "the referenced behavior"),
+        )
+    return scrubbed
+
+
+def _plan_payload(plan: str) -> dict[str, Any] | None:
+    """Decode a supervised plan without making malformed fallback text disappear."""
+    try:
+        payload = json.loads(plan)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _scrub_plan_value(value: Any, alias_map: AliasMap, field: str | None = None) -> Any:
+    """Scrub prose values while preserving JSON keys and protocol-controlled values."""
+    if isinstance(value, dict):
+        return {
+            key: _scrub_plan_value(item, alias_map, field=key)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_scrub_plan_value(item, alias_map, field=field) for item in value]
+    if isinstance(value, str) and field not in _PLAN_CONTROL_FIELDS:
+        return _scrub_plan_prose(value, alias_map)
+    return value
+
+
+def _plan_scan_text(value: Any, field: str | None = None) -> str:
+    """Render only prose-bearing plan values for the clean-room scanner.
+
+    Structural keys and controlled enum/reference values are IATIN vocabulary. Scanning
+    their serialized JSON form produces false positives when an original happens to use
+    a generic name such as ``source`` or ``warnings``.
+    """
+    if isinstance(value, dict):
+        return "\n".join(_plan_scan_text(item, field=key) for key, item in value.items())
+    if isinstance(value, list):
+        return "\n".join(_plan_scan_text(item, field=field) for item in value)
+    if isinstance(value, str) and field not in _PLAN_CONTROL_FIELDS:
+        return value
+    return ""
 
 
 def select_best(attempts: list[PlanAttempt]) -> PlanAttempt | None:
@@ -182,7 +262,7 @@ def _feedback_for_next_round(attempt: PlanAttempt, alias_map: AliasMap) -> list[
         if isinstance(action, str) and action.strip():
             lines.append(action.strip())
 
-    return [scrub_identifiers(line, alias_map) for line in lines]
+    return [_scrub_plan_prose(line, alias_map) for line in lines]
 
 
 def _settle(attempts: list[PlanAttempt], stage: str) -> PlanOutcome:

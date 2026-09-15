@@ -22,6 +22,11 @@ class EvidenceCatalogueEntrySchema(StrictSchema):
     evidence_id = fields.String(required=True, validate=validate.Regexp(r"^EV-\d+$"))
     kind = fields.String(required=True, validate=validate.Length(min=1))
     about = fields.String(required=True, validate=validate.Length(min=1))
+    source_type = fields.String(
+        required=True,
+        validate=validate.OneOf(["code", "documentation"]),
+    )
+    source_role = fields.String(required=True, validate=validate.Length(min=1))
 
 
 class EvidenceCatalogueSchema(StrictSchema):

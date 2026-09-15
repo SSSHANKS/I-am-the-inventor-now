@@ -18,6 +18,27 @@ def test_code_index_finds_the_structure(reader, manifest):
     assert "WidgetStore.load" in {f["qualified_name"] for f in index["functions"]}
 
 
+def test_python_definition_evidence_includes_the_body():
+    from packages.modules.indexing.python_file import index_python_source
+
+    content = "def calculate(value):\n    adjusted = value + 1\n    return adjusted\n"
+    result = {
+        "files_indexed": [],
+        "imports": [],
+        "classes": [],
+        "functions": [],
+        "entrypoints": [],
+        "calls": [],
+        "analysis_targets": [],
+    }
+    index_python_source("src/calculate.py", result, content, content.splitlines())
+
+    evidence_item = result["functions"][0]["evidence"]
+    assert evidence_item["line_start"] == 1
+    assert evidence_item["line_end"] == 3
+    assert "return adjusted" in evidence_item["excerpt"]
+
+
 def test_a_ternary_or_lambda_no_longer_aborts_the_file(reader, manifest):
     """Regression: `body` is a bare expression on IfExp/Lambda, not a list.
 

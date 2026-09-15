@@ -140,7 +140,18 @@ def gate_with_repairs(
             storage.save_text("specification.md", current)
             raise BorderGateError(verdict)
 
-        current = repair(current, failing)
+        specification_findings = [
+            item for item in failing if item.get("artifact") == "specification.md"
+        ]
+        if not specification_findings:
+            log.error(
+                "Border findings are confined to non-specification artifacts; "
+                "specification repair cannot resolve them"
+            )
+            storage.save_text("specification.md", current)
+            raise BorderGateError(verdict)
+
+        current = repair(current, specification_findings)
         storage.save_text(f"specification.border-repair-{attempt + 1}.md", current)
         storage.save_text("specification.md", current)
 

@@ -262,7 +262,20 @@ def test_universal_identifiers_are_not_registered():
 
     alias_map = AliasMap()
     register_code_identifiers(
-        {"functions": [{"name": "main"}, {"name": "value"}, {"name": "go"}]}, alias_map
+        {
+            "functions": [
+                {"name": "main"},
+                {"name": "value"},
+                {"name": "go"},
+                {"name": "source"},
+                {"name": "warnings"},
+                {"name": "output_field"},
+                {"name": "scope"},
+                {"name": "command"},
+                {"name": "section"},
+            ]
+        },
+        alias_map,
     )
     assert alias_map.identifiers == []
 
@@ -574,6 +587,37 @@ def test_a_clean_label_survives_untouched():
     _, art = _catalogue({"title": "Configuration and theming"}, kind="sections")
     assert art["entries"][0]["about"] == "Configuration and theming"
     assert art["border_review"] == []
+
+
+def test_production_code_is_catalogued_before_examples():
+    from packages.modules.boundary import build_evidence_catalogue, mint_evidence_ids
+
+    alias_map = AliasMap(project_name="PROJECT-X")
+    index = {
+        "functions": [
+            {
+                "name": "example_operation",
+                "evidence": {
+                    "file": "examples/demo.py",
+                    "line_start": 1,
+                    "line_end": 2,
+                },
+            },
+            {
+                "name": "production_operation",
+                "evidence": {
+                    "file": "src/product/core.py",
+                    "line_start": 10,
+                    "line_end": 20,
+                },
+            },
+        ]
+    }
+    mint_evidence_ids(alias_map, index)
+    entries = build_evidence_catalogue(alias_map, index, None)["entries"]
+
+    assert entries[0]["source_role"] == "production source"
+    assert entries[-1]["source_role"] == "example source"
 
 
 def test_a_known_original_label_is_still_rejected():

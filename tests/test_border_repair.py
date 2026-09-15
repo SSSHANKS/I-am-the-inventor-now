@@ -106,6 +106,68 @@ def test_repair_loop_raises_when_repairs_exhausted(tmp_path):
     assert storage.exists("specification.border-fail-2.md")
 
 
+def test_repair_loop_does_not_spend_calls_on_non_spec_findings(tmp_path):
+    storage = Storage(artifacts_dir=tmp_path / "artifacts", run_name="unrepairable-plan")
+    calls = 0
+
+    def repair(spec: str, failing: list) -> str:
+        nonlocal calls
+        calls += 1
+        return spec
+
+    try:
+        gate_with_repairs(
+            border=_border_agent(_dismiss_all_stub),
+            repair=repair,
+            storage=storage,
+            alias_map=AliasMap(),
+            specification=CLEAN_SPEC,
+            plans={"code_facts_plan.json": '{"summary":"run python -bb"}'},
+            max_repairs=3,
+        )
+        raised = False
+    except BorderGateError as error:
+        raised = True
+        assert error.verdict.failed_artifacts == ["code_facts_plan.json"]
+
+    assert raised
+    assert calls == 0
+    assert storage.exists("border_verdict.round-1.json")
+    assert not storage.exists("border_verdict.round-2.json")
+
+
+def test_spec_repair_unwraps_document_json_envelope():
+    alias_map = AliasMap()
+    synthesizer = SpecSynthesizerAgent(
+        model="stub/spec",
+        chat_client=StubTextClient(lambda prompt: '{"document":"# Specification\\n\\nClean."}'),
+        alias_map=alias_map,
+    )
+
+    repaired = synthesizer.repair(CLEAN_SPEC, [], alias_map)
+
+    assert repaired == "# Specification\n\nClean."
+
+
+def test_spec_repair_uses_scrubbed_fallback_for_unknown_json_envelope():
+    alias_map = _alias_map_with_widget()
+    synthesizer = SpecSynthesizerAgent(
+        model="stub/spec",
+        chat_client=StubTextClient(lambda prompt: '{"items":[]}'),
+        alias_map=alias_map,
+    )
+    leaked = CLEAN_SPEC + "\nThen call WidgetStore() to continue.\n"
+    findings = failing_findings(
+        evaluate_crossing_artifacts(alias_map=alias_map, specification=leaked)
+    )
+
+    repaired = synthesizer.repair(leaked, findings, alias_map)
+
+    assert repaired.startswith("# ")
+    assert "WidgetStore" not in repaired
+    assert "Component A" in repaired
+
+
 def test_failing_findings_only_lists_fails():
     alias_map = _alias_map_with_widget()
     verdict = evaluate_crossing_artifacts(

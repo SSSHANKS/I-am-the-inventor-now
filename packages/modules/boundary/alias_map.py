@@ -72,6 +72,29 @@ UNIVERSAL_IDENTIFIERS = frozenset(
         "line",
         "time",
         "date",
+        # Planning/schema vocabulary. These words describe IATIN's artifact shape,
+        # not expression belonging to a repository. Registering them lets whole-plan
+        # scanning mistake JSON structure for leaked source identifiers.
+        "stage",
+        "summary",
+        "mini_tasks",
+        "task_id",
+        "task_type",
+        "output_field",
+        "input_refs",
+        "source",
+        "evidence_id",
+        "requirements",
+        "min_items",
+        "not_applicable",
+        "justification",
+        "warnings",
+        # Specification/catalogue vocabulary. These are controlled terms emitted by
+        # IATIN itself, so a repository's coincidental use must not make clean
+        # structured artifacts impossible to express.
+        "scope",
+        "command",
+        "section",
     }
 )
 

@@ -140,6 +140,15 @@ class ScriptedModel:
     def _plan(self, prompt: str) -> dict:
         stage = prompt.split("<stage>", 1)[1].split("</stage>", 1)[0].strip()
         fields = sorted(OUTPUT_FIELDS_BY_STAGE[stage])
+        catalogue_block = prompt.split("<evidence_catalogue>", 1)[1].split(
+            "</evidence_catalogue>", 1
+        )[0]
+        available_ids = [
+            line.split()[1]
+            for line in catalogue_block.splitlines()
+            if line.strip().startswith("- EV-")
+        ]
+        ids = available_ids or self.ids
         return {
             "stage": stage,
             "summary": "covered every field; extra depth on the non-obvious rule",
@@ -151,7 +160,7 @@ class ScriptedModel:
                     "input_refs": [
                         {
                             "source": "evidence_catalogue",
-                            "evidence_id": self.ids[index % len(self.ids)],
+                            "evidence_id": ids[index % len(ids)],
                         }
                     ],
                     "requirements": ["state the exact conditions and what happens otherwise"],

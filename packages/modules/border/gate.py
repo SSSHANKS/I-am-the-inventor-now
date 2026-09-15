@@ -18,6 +18,7 @@ from packages.modules.boundary import (
     DESCRIPTIVE,
     LIFTED,
     UNCERTAIN,
+    VERBATIM,
     AliasMap,
     ResidualFinding,
     scan_content_leaks,
@@ -45,6 +46,9 @@ _HARD_KINDS = frozenset(
 
 #: Soft only when every occurrence reading is in this set.
 _SOFT_CLASSIFICATIONS = frozenset({DESCRIPTIVE, UNCERTAIN})
+_STRUCTURED_CONTROL_FIELDS = frozenset(
+    {"stage", "output_field", "source", "evidence_id", "source_type", "source_role", "kind"}
+)
 
 
 class BorderGateError(Exception):
@@ -184,18 +188,34 @@ def evaluate_crossing_artifacts(
     if specification is not None:
         reviewed.append("specification.md")
         body = strip_border_review_section(specification)
+        if not body.lstrip().startswith("# "):
+            records.append(
+                BorderFindingRecord(
+                    artifact="specification.md",
+                    original="raw Markdown document",
+                    alias=None,
+                    kind="invalid artifact format",
+                    classifications=(VERBATIM,),
+                    occurrence_count=1,
+                    decision=DECISION_FAIL,
+                    summary="Specification must be raw Markdown with a top-level heading",
+                    examples=(body[:120],),
+                )
+            )
         records.extend(review_text("specification.md", body, alias_map, source_texts))
 
     for name, plan_text in sorted((plans or {}).items()):
         reviewed.append(name)
+        plan_payload = _as_mapping(plan_text)
+        scan_text = _structured_prose_text(plan_payload) if plan_payload else plan_text
         records.extend(
-            review_text(name, plan_text, alias_map, source_texts, include_content_scan=True)
+            review_text(name, scan_text, alias_map, source_texts, include_content_scan=True)
         )
 
     if evidence_catalogue is not None:
         reviewed.append("evidence_catalogue.json")
         catalogue = _as_mapping(evidence_catalogue)
-        catalogue_text = json.dumps(catalogue, ensure_ascii=False)
+        catalogue_text = _structured_prose_text(catalogue)
         records.extend(
             review_text(
                 "evidence_catalogue.json",
@@ -359,3 +379,21 @@ def _as_mapping(value: dict[str, Any] | str) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return loaded if isinstance(loaded, dict) else {}
+
+
+def _structured_prose_text(value: Any, field: str | None = None) -> str:
+    """Render prose values without JSON keys or protocol-controlled values."""
+    if isinstance(value, dict):
+        return _join_structured_values(
+            _structured_prose_text(item, key) for key, item in value.items()
+        )
+    if isinstance(value, list):
+        return _join_structured_values(_structured_prose_text(item, field) for item in value)
+    if isinstance(value, str) and field not in _STRUCTURED_CONTROL_FIELDS:
+        return value
+    return ""
+
+
+def _join_structured_values(values: Any) -> str:
+    """Keep scanners from interpreting adjacent JSON values as one command or phrase."""
+    return "\n;\n".join(value for value in values if value)

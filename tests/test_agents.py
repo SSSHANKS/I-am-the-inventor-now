@@ -27,6 +27,43 @@ ALL_AGENTS = [
 READER_AGENTS = [DocumentationAgent, CodeFactsAgent, BehaviorAnalyzerAgent]
 
 
+def test_behavior_narrow_prompt_uses_the_compact_code_index():
+    """A mini task must not paste a multi-megabyte index into every model call."""
+    from packages.agents.dirt_team.code_behavior_agent import _make_narrow_prompt_builder
+
+    functions = [
+        {
+            "file": "module.py",
+            "qualified_name": f"operation_{index}",
+            "owner": None,
+            "args": [],
+            "line_start": index + 1,
+            "line_end": index + 1,
+            "evidence": {"excerpt": "UNBOUNDED_INDEX_CONTENT" * 100},
+        }
+        for index in range(100)
+    ]
+    builder = _make_narrow_prompt_builder(
+        documentation_report={},
+        code_facts_report={},
+        source_code_index={"functions": functions},
+    )
+    prompt = builder(
+        {
+            "requirements": ["describe the selected behavior"],
+            "input_refs": [],
+        },
+        "behaviors",
+        "BEH-001",
+        [],
+    )
+
+    assert "operation_79" in prompt
+    assert "operation_80" not in prompt
+    assert "UNBOUNDED_INDEX_CONTENT" not in prompt
+    assert len(prompt) < 100_000
+
+
 @pytest.mark.parametrize("agent_class", ALL_AGENTS)
 def test_no_agent_defines_its_own_constructor(agent_class):
     """The whole point of the lift: construction is declared once, in the base."""

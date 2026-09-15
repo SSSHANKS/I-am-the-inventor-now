@@ -4,6 +4,8 @@ from typing import Any
 from packages.modules.indexing.models import evidence
 from packages.modules.skills.reading import Reader
 
+_MAX_ANALYSIS_EVIDENCE_LINES = 80
+
 
 def index_python_file(relative_path: str, result: dict[str, Any], source_reader: Reader) -> None:
     content = source_reader.read_file(relative_path)
@@ -88,7 +90,7 @@ def _extract_classes(relative_path: str, tree: ast.AST, lines: list[str]) -> lis
                     for child in node.body
                     if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
                 ],
-                "evidence": evidence(relative_path, lines, node.lineno),
+                "evidence": _node_evidence(relative_path, lines, node),
             }
         )
 
@@ -113,7 +115,7 @@ def _extract_functions(relative_path: str, tree: ast.AST, lines: list[str]) -> l
                 "decorators": [_safe_unparse(decorator) for decorator in node.decorator_list],
                 "line_start": node.lineno,
                 "line_end": node.end_lineno or node.lineno,
-                "evidence": evidence(relative_path, lines, node.lineno),
+                "evidence": _node_evidence(relative_path, lines, node),
             }
         )
 
@@ -135,7 +137,7 @@ def _extract_entrypoints(
                     "kind": "main_guard",
                     "line_start": node.lineno,
                     "line_end": node.end_lineno or node.lineno,
-                    "evidence": evidence(relative_path, lines, node.lineno),
+                    "evidence": _node_evidence(relative_path, lines, node),
                 }
             )
 
@@ -220,7 +222,7 @@ class _CallVisitor(ast.NodeVisitor):
                     "callee": callee,
                     "line_start": node.lineno,
                     "line_end": node.end_lineno or node.lineno,
-                    "evidence": evidence(self.relative_path, self.lines, node.lineno),
+                    "evidence": _node_evidence(self.relative_path, self.lines, node),
                 }
             )
         self.generic_visit(node)
@@ -242,6 +244,14 @@ def _iter_functions_with_parent(tree: ast.AST):
         for node in body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 yield parent, node
+
+
+def _node_evidence(relative_path: str, lines: list[str], node: ast.AST) -> dict[str, Any]:
+    """Capture enough of a definition/call to analyze behavior without unbounded prompts."""
+    start = int(getattr(node, "lineno", 1))
+    declared_end = int(getattr(node, "end_lineno", start) or start)
+    end = min(declared_end, start + _MAX_ANALYSIS_EVIDENCE_LINES - 1)
+    return evidence(relative_path, lines, start, end)
 
 
 def _function_args(arguments: ast.arguments) -> list[str]:

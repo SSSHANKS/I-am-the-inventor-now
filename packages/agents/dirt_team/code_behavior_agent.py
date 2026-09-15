@@ -595,7 +595,7 @@ def _make_narrow_prompt_builder(
 {_format_artifact(code_facts_report)}
 
 [source_code_index]
-{_format_artifact(source_code_index)}
+{_format_source_code_index(source_code_index)}
 
 Produce ONE JSON object with exactly one top-level key: items.
 Each item must match the allowed shape for output_field={output_field!r}.
@@ -676,8 +676,26 @@ def _format_source_code_index(source_code_index: str | dict[str, Any] | None) ->
     if isinstance(source_code_index, str):
         return source_code_index
 
-    context = build_source_code_index_context(source_code_index)
+    context = _without_index_excerpts(build_source_code_index_context(source_code_index))
     return json.dumps(context, ensure_ascii=False, indent=2)
+
+
+def _without_index_excerpts(value: Any) -> Any:
+    """Drop nested excerpts from the orientation index used in behavior prompts.
+
+    Exact source text is already supplied through each mini-task's bounded
+    ``source_sections``. Keeping a second copy inside every index entry defeated the
+    compact 80-entry view and pushed a real prompt past one million tokens.
+    """
+    if isinstance(value, dict):
+        return {
+            key: _without_index_excerpts(item)
+            for key, item in value.items()
+            if key != "excerpt"
+        }
+    if isinstance(value, list):
+        return [_without_index_excerpts(item) for item in value]
+    return value
 
 
 def _format_artifact(value: str | dict[str, Any] | None) -> str:

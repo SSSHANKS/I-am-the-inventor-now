@@ -12,6 +12,7 @@ from packages.agents.planning.loop import (
     run_plan_loop,
     select_best,
 )
+from packages.agents.planning.planner import filter_evidence_catalogue
 from packages.modules.boundary import (
     AliasMap,
     evidence_catalogue,
@@ -91,6 +92,24 @@ def test_an_evidence_id_round_trips_to_a_real_location(mapped):
         assert isinstance(start, int) and isinstance(end, int)
 
 
+def test_catalogue_marks_code_and_documentation_evidence(mapped):
+    catalogue = evidence_catalogue(mapped, CODE_INDEX, DOC_INDEX)
+    assert {entry["source_type"] for entry in catalogue} == {"code", "documentation"}
+    assert all(entry["source_role"] for entry in catalogue)
+
+
+def test_planners_receive_only_stage_compatible_evidence(mapped):
+    catalogue = evidence_catalogue(mapped, CODE_INDEX, DOC_INDEX)
+    assert {
+        entry["source_type"] for entry in filter_evidence_catalogue(catalogue, "code_facts")
+    } == {"code"}
+    assert {
+        entry["source_type"]
+        for entry in filter_evidence_catalogue(catalogue, "documentation")
+    } == {"documentation"}
+    assert len(filter_evidence_catalogue(catalogue, "behavior")) == len(catalogue)
+
+
 def test_the_catalogue_a_planner_sees_carries_no_originals(mapped):
     """The planner cannot leak what it was never shown."""
     from packages.modules.boundary import find_residual_originals
@@ -143,6 +162,23 @@ def test_unresolvable_evidence_is_an_error(mapped):
     result = PlanVerifier().verify(plan, "documentation", alias_map=mapped)
     assert result["valid"] is False
     assert any("EV-999" in i["message"] for i in result["issues"])
+
+
+def test_code_plan_rejects_documentation_evidence(mapped):
+    catalogue = evidence_catalogue(mapped, CODE_INDEX, DOC_INDEX)
+    doc_entry = next(entry for entry in catalogue if entry["source_type"] == "documentation")
+    plan = _covering_plan("code_facts")
+    plan["mini_tasks"][0]["input_refs"] = [
+        {"source": "evidence_catalogue", "evidence_id": doc_entry["evidence_id"]}
+    ]
+    result = PlanVerifier().verify(
+        plan,
+        "code_facts",
+        alias_map=mapped,
+        evidence_catalogue=catalogue,
+    )
+    assert result["valid"] is False
+    assert any("requires code evidence" in issue["message"] for issue in result["issues"])
 
 
 def test_a_ref_carrying_a_file_path_is_an_error(mapped):
@@ -279,6 +315,47 @@ def test_a_leaking_plan_is_scrubbed_then_passes(mapped):
     plan = json.dumps(_plan(summary="focus on the Calculadora component"))
     result, neutral, leaks, scrubbed = enforce_neutrality(plan, mapped)
     assert scrubbed and neutral and not leaks
+    assert "Calculadora" not in result
+
+
+def test_command_shaped_plan_prose_is_scrubbed_before_selection(mapped):
+    plan = json.dumps(
+        _plan(summary="Verify behavior under strict operational modes such as python -bb")
+    )
+    result, neutral, leaks, scrubbed = enforce_neutrality(plan, mapped)
+
+    assert scrubbed and neutral and not leaks
+    assert "python -bb" not in result
+    assert "required runtime mode" in result
+
+
+def test_plan_scrubbing_preserves_keys_and_control_values(mapped):
+    """Neutralisation must not corrupt the plan protocol after schema validation."""
+    mapped.component_alias("source", kind="function")
+    mapped.component_alias("warnings", kind="module")
+    plan = _plan(
+        summary="inspect Calculadora without copying its implementation",
+        mini_tasks=[
+            {
+                "task_id": "DOC-001",
+                "task_type": "inspect Calculadora",
+                "output_field": "warnings",
+                "input_refs": [{"source": "evidence_catalogue", "evidence_id": "EV-001"}],
+                "requirements": ["describe Calculadora behavior"],
+                "min_items": 1,
+            }
+        ],
+    )
+
+    result, neutral, leaks, scrubbed = enforce_neutrality(json.dumps(plan), mapped)
+    payload = json.loads(result)
+
+    assert scrubbed and neutral and not leaks
+    assert payload["mini_tasks"][0]["output_field"] == "warnings"
+    assert payload["mini_tasks"][0]["input_refs"][0] == {
+        "source": "evidence_catalogue",
+        "evidence_id": "EV-001",
+    }
     assert "Calculadora" not in result
 
 
