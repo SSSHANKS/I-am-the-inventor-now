@@ -359,7 +359,10 @@ Never ask production repair to change a signature merely to fit a mistaken probe
 Never invent private callback hooks
 or assign guessed internal attributes to make lifecycle observations. If a required
 behavior has no usable public contract, expose the contract gap rather than fabricate
-an implementation detail. Respect declared return values when using decorators.
+an implementation detail. A lifecycle-observer probe must register or obtain the
+declared observer through a public interaction path, perform the producing operation,
+and assert the resulting notification; constructing a disconnected observer and
+checking its initial state proves nothing. Respect declared return values when using decorators.
 For weak-reference APIs, keep a named callback alive throughout ordinary dispatch
 checks; inline lambdas can be collected immediately. Use weak=False explicitly when
 the scenario calls for strong ownership. Test collection separately by deliberately
@@ -387,12 +390,15 @@ The approved specification defines the required behavior. Validated behavior_rul
 also carry explicitly recorded Clean choices for details the specification leaves
 open; use those same choices for fixtures and expectations, without claiming they
 describe the original project. Never independently choose a conflicting format,
-argument convention, or callback-result shape. Never invent an output
+argument convention, or callback-result shape. Do not assign a concrete value or
+non-null identity to a public constant when the specification only requires the
+constant or selector to be accessible.
 Explicit error rules constrain every probe, not only the probe assigned to that error
 requirement. For example, when synchronous use with an asynchronous callable must
 raise, result probes must exercise synchronous-only and asynchronous paths separately;
 they cannot demand partial synchronous results from the prohibited mixed call.
-template, separator, prefix, suffix, registry entry, default value, command name, option
+Never invent an output template, separator, prefix, suffix, registry entry, default
+value, command name, option
 name, or exception text that it does not state. An example input chosen by the probe does
 not authorize inventing an exact formatted output for that input. Use the weakest strong
 assertion that proves the stated behavior: prefer identity, state transitions, ordering,

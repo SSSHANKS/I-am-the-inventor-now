@@ -117,3 +117,33 @@ def evaluate_repair_candidate(
         if before_validation != after_validation:
             regressions.append('Validation modified the repair candidate; validated content cannot be published')
         return checks, regressions
+
+
+def select_non_regressing_repair_subset(
+    workspace: CleanWorkspace,
+    replacements: list[dict[str, str]],
+    allowed_paths: set[str],
+    before_checks: list[dict[str, Any]],
+    validator: Callable[[CleanWorkspace], list[dict[str, Any]]],
+) -> tuple[list[dict[str, str]], list[dict[str, Any]] | None]:
+    """Greedily retain independently safe progress from a rejected batch.
+
+    Every accepted prefix is revalidated as one transaction against the unchanged
+    workspace. This is deliberately linear rather than an exponential subset search.
+    """
+    accepted: list[dict[str, str]] = []
+    accepted_checks: list[dict[str, Any]] | None = None
+    for replacement in sorted(replacements, key=lambda item: item["path"]):
+        trial = [*accepted, replacement]
+        checks, regressions = evaluate_repair_candidate(
+            workspace,
+            trial,
+            allowed_paths,
+            before_checks,
+            validator,
+        )
+        if regressions:
+            continue
+        accepted = trial
+        accepted_checks = checks
+    return accepted, accepted_checks

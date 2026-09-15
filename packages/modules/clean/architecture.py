@@ -163,6 +163,21 @@ def _normalise_python_package_surface_names(
     for contract in architecture["contracts"]:
         qualified_name = str(contract["qualified_name"])
         module, separator, symbol = qualified_name.rpartition(".")
+        if (
+            separator
+            and symbol == "__init__"
+            and _python_string_collection_assignment(
+                str(contract.get("declaration", "")), "__init__"
+            )
+        ):
+            contract["qualified_name"] = f"{module}.__all__"
+            contract["declaration"] = re.sub(
+                r"^(\s*)__init__(?=\s*=)",
+                r"\1__all__",
+                str(contract["declaration"]),
+                count=1,
+            )
+            continue
         if not separator or not module.endswith(".__init__"):
             continue
         package = module.removesuffix(".__init__")
@@ -192,6 +207,20 @@ def _python_constant_declaration(declaration: str) -> ast.Assign | ast.AnnAssign
     ):
         return node
     return None
+
+
+def _python_string_collection_assignment(declaration: str, name: str) -> bool:
+    node = _python_constant_declaration(declaration)
+    if not isinstance(node, ast.Assign) or not isinstance(node.targets[0], ast.Name):
+        return False
+    return (
+        node.targets[0].id == name
+        and isinstance(node.value, (ast.List, ast.Tuple, ast.Set))
+        and all(
+            isinstance(item, ast.Constant) and isinstance(item.value, str)
+            for item in node.value.elts
+        )
+    )
 
 
 def _recover_contract_component_requirements(architecture: dict[str, Any]) -> None:
@@ -700,11 +729,20 @@ def _validate_observable_auxiliary_contracts(architecture: dict[str, Any]) -> No
 
         if registration_shape(observer_declaration):
             return True
-        if registration_shape(str(producer.get("declaration", ""))):
-            return True
         observer_name = str(observer.get("qualified_name", "")).rsplit(".", 1)[-1]
+        producer_declaration = str(producer.get("declaration", ""))
+        if any(
+            registration_shape(line)
+            and (
+                "observer" in line.casefold()
+                or "lifecycle" in line.casefold()
+                or observer_name.casefold() in line.casefold()
+            )
+            for line in producer_declaration.splitlines()
+        ):
+            return True
         if observer_name and re.search(
-            rf"\b{re.escape(observer_name)}\b", str(producer.get("declaration", ""))
+            rf"\b{re.escape(observer_name)}\b", producer_declaration
         ):
             return True
         related_components = {producer["component_id"], observer["component_id"]}

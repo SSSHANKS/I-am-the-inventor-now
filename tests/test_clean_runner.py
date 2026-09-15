@@ -26,6 +26,7 @@ from packages.modules.clean.runner import (
     _normalise_plan,
     _repair_context,
     _repair_paths,
+    _requirement_status,
     _safe_error,
 )
 from packages.modules.clean.workspace import CleanWorkspace, WorkspaceError
@@ -1240,6 +1241,36 @@ def test_clean_runner_reports_structure_level_when_syntax_is_disabled(tmp_path):
     assert next(check for check in result.report["checks"] if check["name"] == "syntax")[
         "status"
     ] == "skipped"
+
+
+def test_partial_build_can_report_independently_satisfied_requirements():
+    status = _requirement_status(
+        {"greeting.py"},
+        generated={"greeting.py"},
+        success=False,
+        requirement_id="FR-001",
+        behavior_validation_configured=True,
+        covered_requirement_ids={"FR-001", "FR-002"},
+        failed_requirement_ids={"FR-002"},
+        failed_project_paths=set(),
+    )
+
+    assert status == "satisfied"
+
+
+def test_uncovered_requirement_remains_partial_in_executable_build():
+    status = _requirement_status(
+        {"greeting.py"},
+        generated={"greeting.py"},
+        success=False,
+        requirement_id="EH-004",
+        behavior_validation_configured=True,
+        covered_requirement_ids={"FR-001"},
+        failed_requirement_ids=set(),
+        failed_project_paths=set(),
+    )
+
+    assert status == "partial"
 
 
 def test_clean_runner_requires_a_passed_executable_gate_for_success(tmp_path):

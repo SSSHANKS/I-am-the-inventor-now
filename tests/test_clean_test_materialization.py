@@ -31,7 +31,7 @@ def _suite():
     }
 
 
-def test_python_adapter_materialises_probes_as_independent_project_tests():
+def test_python_adapter_materialises_probes_as_independent_project_tests(tmp_path):
     suite = _suite()
 
     files = materialise_python_behavior_tests(suite)
@@ -41,11 +41,36 @@ def test_python_adapter_materialises_probes_as_independent_project_tests():
     ]
     assert files[0]["requirement_ids"] == ["FR-001", "EH-001"]
     assert files[0]["scenario_ids"] == ["TC-001"]
-    namespace = {}
+    test_path = tmp_path / files[0]["path"]
+    namespace = {"__file__": str(test_path)}
     exec(compile(files[0]["content"], files[0]["path"], "exec"), namespace)
     assert namespace["_SOURCE_PROBE_001"] == suite["probes"][0]["code"]
     namespace["test_probe_001_fr_001_tc_001"]()
     namespace["test_probe_002_eh_001"]()
+
+
+def test_materialised_tests_bootstrap_a_src_layout(tmp_path):
+    package = tmp_path / "src/example_package"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("VALUE = 42\n", encoding="utf-8")
+    suite = _suite()
+    suite["probes"] = [
+        {
+            "probe_id": "PROBE-001",
+            "capability_id": "CAP-001",
+            "requirement_ids": ["FR-001"],
+            "scenario_ids": [],
+            "code": "from example_package import VALUE\nassert VALUE == 42\n",
+        }
+    ]
+    generated = materialise_python_behavior_tests(suite)[0]
+    test_path = tmp_path / generated["path"]
+    test_path.parent.mkdir()
+    test_path.write_text(generated["content"], encoding="utf-8")
+    namespace = {"__file__": str(test_path)}
+
+    exec(compile(generated["content"], str(test_path), "exec"), namespace)
+    namespace["test_probe_001_fr_001"]()
 
 
 def test_adapter_tests_are_planned_after_production_files():

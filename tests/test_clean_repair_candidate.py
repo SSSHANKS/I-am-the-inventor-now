@@ -4,6 +4,7 @@ from packages.modules.clean.repair_candidate import (
     evaluate_repair_candidate,
     repair_improvements,
     repair_regressions,
+    select_non_regressing_repair_subset,
 )
 from packages.modules.clean.workspace import CleanWorkspace
 
@@ -115,6 +116,37 @@ def test_staged_missing_file_does_not_leak_to_working_project(tmp_path):
     workspace = CleanWorkspace(tmp_path/'output')
     evaluate_repair_candidate(workspace, [{'path': 'new.go', 'content': 'candidate'}], {'new.go'}, [], lambda _: [])
     assert workspace.list_generated_files() == []
+
+
+def test_safe_file_is_retained_from_a_mixed_repair_batch(tmp_path):
+    workspace = CleanWorkspace(tmp_path / "output")
+    workspace.write_generated_files([
+        {"path": "good.py", "content": "wrong"},
+        {"path": "bad.py", "content": "stable"},
+    ])
+    before = [check("behavior-probes", "fail", ids=["probe.good"])]
+
+    def validate(candidate):
+        if candidate.read_generated_file("bad.py") != "stable":
+            return [check("contracts", "fail")]
+        if candidate.read_generated_file("good.py") == "fixed":
+            return [check("behavior-probes", "pass")]
+        return before
+
+    accepted, checks = select_non_regressing_repair_subset(
+        workspace,
+        [
+            {"path": "bad.py", "content": "regression"},
+            {"path": "good.py", "content": "fixed"},
+        ],
+        {"bad.py", "good.py"},
+        before,
+        validate,
+    )
+
+    assert accepted == [{"path": "good.py", "content": "fixed"}]
+    assert checks == [check("behavior-probes", "pass")]
+    assert workspace.read_generated_file("good.py") == "wrong"
 
 
 @pytest.mark.parametrize('budget', [1, 2])

@@ -367,6 +367,65 @@ def test_meaningful_boolean_assertions_remain_valid(expression):
                                   _architecture())
 
 
+def test_non_null_public_constant_cannot_be_invented_alongside_strong_assertion():
+    architecture = _architecture()
+    architecture["contracts"].append({
+        "contract_id": "SYM-002",
+        "component_id": "CMP-001",
+        "qualified_name": "greeting.WILDCARD",
+        "kind": "constant",
+        "declaration": "WILDCARD = None",
+        "visibility": "public",
+        "requirement_ids": ["FR-001"],
+        "behavior_rules": [{
+            "aspect": "state",
+            "statement": "The wildcard selector is publicly accessible.",
+            "requirement_ids": ["FR-001"],
+            "source": "specification",
+            "evidence": [{"requirement_id": "FR-001", "excerpt": "publicly accessible"}],
+        }],
+    })
+    code = (
+        "from greeting import WILDCARD, greeting\n"
+        "assert WILDCARD is not None\n"
+        "assert greeting('Ada') == 'Hello, Ada!'\n"
+    )
+
+    with pytest.raises(BehaviorProbeError, match="invents a non-null value"):
+        validate_behavior_probe_suite(_suite(code), architecture)
+
+
+def test_general_result_probe_cannot_contradict_sync_async_error_rule():
+    architecture = _architecture()
+    architecture["contracts"][0]["declaration"] = (
+        "class Greeter:\n"
+        "    def connect(self, handler: callable) -> None: ...\n"
+        "    def send(self, name: str) -> list[object]: ..."
+    )
+    architecture["contracts"][0]["behavior_rules"] = [{
+        "aspect": "errors",
+        "statement": "Synchronous dispatch raises RuntimeError for an async handler.",
+        "requirement_ids": ["EH-001"],
+        "source": "specification",
+        "evidence": [{
+            "requirement_id": "EH-001",
+            "excerpt": "Synchronous dispatch raises RuntimeError for an async handler.",
+        }],
+    }]
+    architecture["capabilities"][0]["requirement_ids"].append("EH-001")
+    code = (
+        "from greeting import Greeter\n"
+        "greeter = Greeter()\n"
+        "async def receiver(name):\n    return name\n"
+        "greeter.connect(receiver)\n"
+        "greeter.send('Ada')\n"
+        "assert len([1]) == 1\n"
+    )
+
+    with pytest.raises(BehaviorProbeError, match="contradicts synchronous/asynchronous"):
+        validate_behavior_probe_suite(_suite(code), architecture, require_complete=False)
+
+
 def test_exception_failure_guard_remains_valid(tmp_path):
     workspace = CleanWorkspace(tmp_path / 'output')
     workspace.write_generated_file('greeting.py', 'def greeting():\n    raise ValueError("invalid")\n')

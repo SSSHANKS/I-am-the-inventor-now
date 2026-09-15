@@ -5,7 +5,6 @@ import json
 import re
 from typing import Any
 
-
 _TEST_PATH = "tests/test_reconstruction_behavior.py"
 
 
@@ -26,7 +25,12 @@ def materialise_python_behavior_tests(
         "This file is adapter-generated after production planning. Each test executes\n",
         "one immutable behavior probe in an isolated module namespace.\n",
         '"""\n\n',
-        "\n",
+        "from pathlib import Path as _Path\n",
+        "import sys as _sys\n\n",
+        "_PROJECT_ROOT = _Path(__file__).resolve().parents[1]\n",
+        "_SOURCE_ROOT = _PROJECT_ROOT / \"src\"\n",
+        "_sys.path.insert(0, str(_SOURCE_ROOT if _SOURCE_ROOT.is_dir() "
+        "else _PROJECT_ROOT))\n\n",
         "def _run_probe(probe_id: str, source: str) -> None:\n",
         "    namespace = {\n",
         '        "__name__": "__main__",\n',

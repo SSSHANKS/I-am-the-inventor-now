@@ -15,7 +15,9 @@ from typing import Any, Protocol
 
 from packages.modules.clean.diagnostics import CleanDiagnostic
 from packages.modules.clean.probe_contracts import (
-    ProbeArchitectureError, ProbeContractError, validate_probe_contracts,
+    ProbeArchitectureError,
+    ProbeContractError,
+    validate_probe_contracts,
 )
 
 MAX_BEHAVIOR_PROBES = 64
@@ -150,6 +152,7 @@ def validate_behavior_probe_suite(
             allowed_import_roots,
             requires_boundary_mock=_requires_boundary_mock(capability),
         )
+        _validate_probe_semantics(probe, capability, architecture)
         try:
             validate_probe_contracts(probe['code'], architecture['contracts'])
         except ProbeArchitectureError as exc:
@@ -299,6 +302,116 @@ def _call_name(node: ast.expr) -> str:
         parent = _call_name(node.value)
         return f"{parent}.{node.attr}" if parent else node.attr
     return ""
+
+
+def _validate_probe_semantics(
+    probe: dict[str, Any],
+    capability: dict[str, Any],
+    architecture: dict[str, Any],
+) -> None:
+    """Reject plausible-looking assertions that contradict or exceed the oracle."""
+    tree = ast.parse(probe["code"], filename=f"{probe['probe_id']}.py")
+    requirement_id = probe["requirement_ids"][0]
+    component_ids = set(capability["component_ids"])
+    relevant_contracts = [
+        contract
+        for contract in architecture["contracts"]
+        if contract.get("component_id") in component_ids
+    ]
+    own_text = " ".join(
+        _rule_text(rule)
+        for contract in relevant_contracts
+        for rule in contract.get("behavior_rules", [])
+        if requirement_id in rule.get("requirement_ids", [])
+    ).casefold()
+
+    imported_constants = {
+        alias.asname or alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+        if (alias.asname or alias.name).isupper()
+    }
+    non_null_names = {
+        node.left.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Compare)
+        and isinstance(node.left, ast.Name)
+        and len(node.ops) == 1
+        and isinstance(node.ops[0], ast.IsNot)
+        and len(node.comparators) == 1
+        and isinstance(node.comparators[0], ast.Constant)
+        and node.comparators[0].value is None
+    }
+    unsupported = imported_constants & non_null_names
+    non_null_grounding = (
+        "non-null",
+        "not none",
+        "sentinel",
+        "unique object",
+        "distinct object",
+        "identity",
+    )
+    if unsupported and not any(term in own_text for term in non_null_grounding):
+        raise BehaviorProbeError(
+            f"Probe {probe['probe_id']} invents a non-null value for public constant "
+            f"{sorted(unsupported)[0]!r}; its requirement only supports observable "
+            "behavior explicitly stated by the architecture"
+        )
+
+    async_names = {
+        node.name for node in tree.body if isinstance(node, ast.AsyncFunctionDef)
+    }
+    if not async_names:
+        return
+    registration_terms = {"add", "attach", "bind", "connect", "register", "subscribe"}
+    dispatch_terms = {"call", "dispatch", "emit", "invoke", "notify", "publish", "send"}
+    registers_async = any(
+        isinstance(node, ast.Call)
+        and _call_name(node.func).rsplit(".", 1)[-1].casefold() in registration_terms
+        and any(isinstance(arg, ast.Name) and arg.id in async_names for arg in node.args)
+        for node in ast.walk(tree)
+    )
+    directly_dispatches = any(
+        isinstance(statement, ast.Expr)
+        and isinstance(statement.value, ast.Call)
+        and _call_name(statement.value.func).rsplit(".", 1)[-1].casefold()
+        in dispatch_terms
+        for statement in tree.body
+    )
+    constraining_requirements = {
+        rule_requirement
+        for contract in relevant_contracts
+        for rule in contract.get("behavior_rules", [])
+        if _is_sync_async_error_rule(_rule_text(rule))
+        for rule_requirement in rule.get("requirement_ids", [])
+    }
+    if (
+        registers_async
+        and directly_dispatches
+        and constraining_requirements
+        and requirement_id not in constraining_requirements
+    ):
+        raise BehaviorProbeError(
+            f"Probe {probe['probe_id']} contradicts synchronous/asynchronous error "
+            "requirements " + ", ".join(sorted(constraining_requirements))
+        )
+
+
+def _rule_text(rule: dict[str, Any]) -> str:
+    evidence = " ".join(
+        str(item.get("excerpt", "")) for item in rule.get("evidence", [])
+    )
+    return f"{rule.get('statement', '')} {evidence}"
+
+
+def _is_sync_async_error_rule(text: str) -> bool:
+    folded = text.casefold()
+    return (
+        any(term in folded for term in ("synchronous", "sync ", "sync dispatch"))
+        and any(term in folded for term in ("asynchronous", "async", "coroutine"))
+        and any(term in folded for term in ("error", "raise", "reject", "runtimeerror"))
+    )
 
 
 def _executed_assertions(tree: ast.Module) -> list[ast.Assert]:

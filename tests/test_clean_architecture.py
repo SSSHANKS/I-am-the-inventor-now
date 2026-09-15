@@ -298,6 +298,56 @@ def test_observer_interaction_may_be_registered_by_the_producer_contract():
     validate_architecture(architecture, specification)
 
 
+def test_ordinary_operation_handlers_are_not_lifecycle_observer_registration():
+    specification = SPECIFICATION.replace(
+        "Return a greeting for the supplied name.",
+        "Dedicated lifecycle events notify observers after operations.",
+    )
+    architecture = _architecture()
+    architecture["contracts"][0]["declaration"] = (
+        "class Greeter:\n"
+        "    def greet(self, name: str) -> str: ...\n"
+        "    def connect(self, handler: callable) -> None: ..."
+    )
+    architecture["contracts"][0]["behavior_rules"] = [{
+        "aspect": "state",
+        "statement": "Dedicated lifecycle events notify observers after operations.",
+        "requirement_ids": ["FR-001"],
+        "source": "specification",
+        "evidence": [{
+            "requirement_id": "FR-001",
+            "excerpt": "Dedicated lifecycle events notify observers after operations.",
+        }],
+    }]
+    architecture["contracts"].append({
+        "contract_id": "SYM-002",
+        "component_id": "CMP-001",
+        "qualified_name": "greeting.LifecycleObserver",
+        "kind": "class",
+        "declaration": "class LifecycleObserver:\n    def update(self) -> None: ...",
+        "visibility": "public",
+        "requirement_ids": ["FR-001"],
+    })
+
+    with pytest.raises(CleanArchitectureError, match="interaction path"):
+        validate_architecture(architecture, specification)
+
+
+def test_python_package_init_export_contract_normalises_to_all():
+    architecture = _architecture()
+    contract = architecture["contracts"][0]
+    contract.update(
+        qualified_name="greeting.__init__",
+        kind="constant",
+        declaration='__init__ = ["greet"]',
+    )
+
+    normalised = normalise_architecture(architecture)
+
+    assert normalised["contracts"][0]["qualified_name"] == "greeting.__all__"
+    assert normalised["contracts"][0]["declaration"] == '__all__ = ["greet"]'
+
+
 def test_mixed_rule_normalisation_prunes_only_misattributed_evidence():
     architecture = _architecture()
     rule = {

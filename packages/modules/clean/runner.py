@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from packages.agents.base_agent import ModelCallError
 from packages.agents.clean_team import (
     CleanArchitectAgent,
     CleanBehaviorProbeAgent,
@@ -18,7 +19,6 @@ from packages.agents.clean_team import (
     CleanPlannerAgent,
     CleanRepairAgent,
 )
-from packages.agents.base_agent import ModelCallError
 from packages.modules.clean.adapters import (
     ReadinessExecutor,
     RuntimeAdapter,
@@ -43,8 +43,11 @@ from packages.modules.clean.diagnostics import (
 from packages.modules.clean.execution import ValidationExecutor, is_python_test_path
 from packages.modules.clean.manifest import validate_manifest
 from packages.modules.clean.python_contracts import python_contract_declaration_error
+from packages.modules.clean.repair_candidate import (
+    evaluate_repair_candidate,
+    select_non_regressing_repair_subset,
+)
 from packages.modules.clean.requirements import prepare_specification, requirement_statements
-from packages.modules.clean.repair_candidate import evaluate_repair_candidate
 from packages.modules.clean.validation import checks_passed, failed_paths, validate_project
 from packages.modules.clean.workspace import (
     MAX_FILES,
@@ -510,12 +513,29 @@ class CleanRunner:
                         },
                     )
                     break
-                candidate_generation_failures = [
-                    check
-                    for check in generation_failures
-                    if not set(check["paths"]).intersection(paths)
-                ]
-                def validate_candidate(candidate_workspace):
+                current_snapshot = tuple(current.items())
+
+                def validate_candidate(
+                    candidate_workspace,
+                    *,
+                    allowed_paths=frozenset(allowed),
+                    current_items=current_snapshot,
+                    base_generation_failures=tuple(generation_failures),
+                ):
+                    current_files = dict(current_items)
+                    candidate_files = set(candidate_workspace.list_generated_files())
+                    candidate_changed_paths = {
+                        path
+                        for path in allowed_paths
+                        if path in candidate_files
+                        and candidate_workspace.read_generated_file(path)
+                        != current_files.get(path)
+                    }
+                    candidate_generation_failures = [
+                        check
+                        for check in base_generation_failures
+                        if not set(check["paths"]).intersection(candidate_changed_paths)
+                    ]
                     return self._validate(
                         candidate_workspace,
                         plan,
@@ -530,6 +550,32 @@ class CleanRunner:
                 candidate_checks, regressions = evaluate_repair_candidate(
                     workspace, replacements, allowed, checks, validate_candidate,
                 )
+                rejected_candidate_paths: list[str] = []
+                if regressions and len(replacements) > 1:
+                    safe_replacements, safe_checks = select_non_regressing_repair_subset(
+                        workspace,
+                        replacements,
+                        allowed,
+                        checks,
+                        validate_candidate,
+                    )
+                    if safe_replacements and safe_checks is not None:
+                        accepted_paths = {
+                            item["path"] for item in safe_replacements
+                        }
+                        rejected_candidate_paths = sorted(set(paths) - accepted_paths)
+                        replacements = safe_replacements
+                        paths = [item["path"] for item in replacements]
+                        replacements_by_path = {
+                            item["path"]: item["content"] for item in replacements
+                        }
+                        changed_paths = sorted(
+                            path
+                            for path, content in replacements_by_path.items()
+                            if current.get(path) != content
+                        )
+                        candidate_checks = safe_checks
+                        regressions = []
                 if regressions:
                     rejection_message = "\n".join(regressions)
                     rationale = str(repair.get("rationale", "")).strip()
@@ -555,7 +601,12 @@ class CleanRunner:
                     })
                     continue
                 workspace.write_generated_files(replacements, allowed_paths=allowed)
-                generation_failures = candidate_generation_failures
+                accepted_paths = {item["path"] for item in replacements}
+                generation_failures = [
+                    check
+                    for check in generation_failures
+                    if not set(check["paths"]).intersection(accepted_paths)
+                ]
                 checks = candidate_checks
                 rejected_feedback = None
                 after_failure_fingerprint = failure_fingerprint(checks)
@@ -576,6 +627,7 @@ class CleanRunner:
                         "omitted_related_paths": omitted_related,
                         "replaced_paths": sorted(paths),
                         "changed_paths": changed_paths,
+                        "rejected_candidate_paths": rejected_candidate_paths,
                         "rationale": repair["rationale"],
                         "outcome": (
                             "resolved"
@@ -1227,6 +1279,28 @@ class CleanRunner:
         for item in plan["files"]:
             for requirement_id in item["requirement_ids"]:
                 requirements.setdefault(requirement_id, set()).add(item["path"])
+        failed_requirement_ids = {
+            str(requirement_id)
+            for check in checks
+            if check["status"] == "fail"
+            for diagnostic in check.get("diagnostics", [])
+            for requirement_id in diagnostic.get("requirement_ids", [])
+        }
+        non_behavior_failures = [
+            check
+            for check in checks
+            if check["status"] == "fail"
+            and check["name"] not in {"python-behavior-probes", "python-behavior-coverage"}
+        ]
+        failed_project_paths = {
+            str(path) for check in non_behavior_failures for path in check.get("paths", [])
+        }
+        has_global_failure = any(not check.get("paths") for check in non_behavior_failures)
+        covered_requirement_ids = {
+            str(requirement_id)
+            for probe in (behavior_suite or {}).get("probes", [])
+            for requirement_id in probe.get("requirement_ids", [])
+        }
         requirement_status = [
             {
                 "requirement_id": requirement_id,
@@ -1234,6 +1308,12 @@ class CleanRunner:
                     paths,
                     generated=set(generated),
                     success=success,
+                    requirement_id=requirement_id,
+                    behavior_validation_configured=behavior_suite is not None,
+                    covered_requirement_ids=covered_requirement_ids,
+                    failed_requirement_ids=failed_requirement_ids,
+                    failed_project_paths=failed_project_paths,
+                    has_global_failure=has_global_failure,
                 ),
                 "paths": sorted(paths),
             }
@@ -2008,12 +2088,27 @@ def _requirement_status(
     *,
     generated: set[str],
     success: bool,
+    requirement_id: str | None = None,
+    behavior_validation_configured: bool = False,
+    covered_requirement_ids: set[str] | None = None,
+    failed_requirement_ids: set[str] | None = None,
+    failed_project_paths: set[str] | None = None,
+    has_global_failure: bool = False,
 ) -> str:
+    if not paths.issubset(generated):
+        return "partial" if paths.intersection(generated) else "blocked"
     if success:
         return "satisfied"
-    if paths.intersection(generated):
-        return "partial"
-    return "blocked"
+    if behavior_validation_configured:
+        if (
+            requirement_id in (failed_requirement_ids or set())
+            or requirement_id not in (covered_requirement_ids or set())
+            or paths.intersection(failed_project_paths or set())
+            or has_global_failure
+        ):
+            return "partial"
+        return "satisfied"
+    return "partial"
 
 
 def _validation_level(checks: list[dict[str, Any]]) -> str:
