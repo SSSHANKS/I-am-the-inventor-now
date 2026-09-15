@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import re
+from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,6 +18,7 @@ from packages.agents.clean_team import (
     CleanPlannerAgent,
     CleanRepairAgent,
 )
+from packages.agents.base_agent import ModelCallError
 from packages.modules.clean.adapters import (
     ReadinessExecutor,
     RuntimeAdapter,
@@ -38,6 +40,7 @@ from packages.modules.clean.execution import ValidationExecutor, is_python_test_
 from packages.modules.clean.manifest import validate_manifest
 from packages.modules.clean.python_contracts import python_contract_declaration_error
 from packages.modules.clean.requirements import prepare_specification, requirement_statements
+from packages.modules.clean.repair_candidate import evaluate_repair_candidate
 from packages.modules.clean.validation import checks_passed, failed_paths, validate_project
 from packages.modules.clean.workspace import (
     MAX_FILES,
@@ -59,6 +62,21 @@ log = logging.getLogger(__name__)
 
 class CleanBuildError(Exception):
     """Clean could not safely plan or construct the requested project."""
+
+
+class _ManifestPlanningFailure(ValueError):
+    def __init__(self, message, architecture, manifest, attempts):
+        super().__init__(message)
+        self.architecture = deepcopy(architecture)
+        self.manifest = deepcopy(manifest)
+        self.attempts = deepcopy(attempts)
+
+
+class _ArchitecturePlanningFailure(ValueError):
+    def __init__(self, message, architecture, attempts):
+        super().__init__(message)
+        self.architecture = deepcopy(architecture)
+        self.attempts = deepcopy(attempts)
 
 
 MAX_DEPENDENCY_CONTEXT_BYTES = 512 * 1024
@@ -89,6 +107,7 @@ class CleanRunner:
         behavior_prober: CleanBehaviorProbeAgent | None = None,
         behavior_executor: BehaviorProbeExecutor | None = None,
         readiness_executor: ReadinessExecutor | None = None,
+        execution_configurator: Callable[[RuntimeAdapter], tuple[Any, Any]] | None = None,
         max_repairs: int = 2,
         syntax_checks: bool = True,
         validation_executor: ValidationExecutor | None = None,
@@ -107,6 +126,11 @@ class CleanRunner:
             )
         if behavior_prober is not None and architect is None:
             raise ValueError("Clean behavioral validation requires project-first planning")
+        if execution_configurator is not None:
+            if architect is None:
+                raise ValueError("Adapter execution configuration requires project-first planning")
+            if any(item is not None for item in (behavior_prober, behavior_executor, readiness_executor)):
+                raise ValueError("Use adapter execution configuration or injected executors, not both")
         agents = (planner, architect, manifest_designer, behavior_prober, builder, repairer)
         for agent in (item for item in agents if item is not None):
             if agent.source_reader is not None or agent.alias_map is not None:
@@ -124,6 +148,7 @@ class CleanRunner:
         self.syntax_checks = syntax_checks
         self.validation_executor = validation_executor
         self.readiness_executor = readiness_executor
+        self.execution_configurator = execution_configurator
 
     def run(self, handoff_dir: str | Path, output_root: str | Path) -> CleanBuildResult:
         handoff = load_clean_handoff(handoff_dir)
@@ -182,7 +207,25 @@ class CleanRunner:
                 )
                 self._validate_plan(plan, prepared_specification.text)
         except Exception as exc:
-            raise CleanBuildError(f"Clean planning failed: {exc}") from exc
+            if not project_first:
+                raise CleanBuildError(f"Clean planning failed: {exc}") from exc
+            diagnostic_location = ""
+            try:
+                failed_workspace = CleanWorkspace(output_root)
+                details = {
+                    "status": "planning-failed",
+                    "stage": ("manifest" if isinstance(exc, _ManifestPlanningFailure) else
+                              "architecture" if isinstance(exc, _ArchitecturePlanningFailure) else "planning"),
+                    "error": _safe_error(exc),
+                    "architecture": getattr(exc, "architecture", architecture),
+                    "manifest": getattr(exc, "manifest", manifest),
+                    "attempts": getattr(exc, "attempts", []),
+                }
+                saved = failed_workspace.write_metadata_json("planning_failure.json", details)
+                diagnostic_location = f"; planning diagnostics: {saved}"
+            except Exception as save_error:
+                log.warning("Could not save planning diagnostics: %s", _safe_error(save_error))
+            raise CleanBuildError(f"Clean planning failed: {exc}{diagnostic_location}") from exc
 
         workspace = CleanWorkspace(output_root)
         workspace.write_metadata_json(
@@ -278,6 +321,7 @@ class CleanRunner:
         structural_repairs_used = 0
         behavior_repairs_used = 0
         repair_stop_reason: str | None = None
+        rejected_feedback: dict[str, Any] | None = None
         while not checks_passed(checks):
             behavior_stage = _only_behavior_failures(checks)
             stage_repairs_used = (
@@ -301,6 +345,8 @@ class CleanRunner:
             else:
                 structural_repairs_used += 1
             failures = [check for check in checks if check["status"] == "fail"]
+            if rejected_feedback is not None:
+                failures.append(rejected_feedback)
             try:
                 generated = set(workspace.list_generated_files())
                 current = {
@@ -334,6 +380,9 @@ class CleanRunner:
                     attempt_number=stage_repairs_used + 1,
                     related_files=related,
                     omitted_related_paths=omitted_related,
+                    failing_behavior_probes=_failing_behavior_probes(
+                        checks, behavior_suite
+                    ),
                 )
                 replacements = repair["replacements"]
                 if runtime_adapter is not None:
@@ -342,10 +391,52 @@ class CleanRunner:
                             replacement["path"], replacement["content"], architecture, manifest
                         )
                 paths = [item["path"] for item in replacements]
-                if len(paths) != len(set(paths)) or not paths:
-                    raise WorkspaceError("Repair must return unique replacement paths")
-                if not set(paths).issubset(allowed):
-                    raise WorkspaceError("Repair attempted to modify a path outside its failure task")
+                output_errors = []
+                if not paths:
+                    output_errors.append("Repair returned no replacement paths")
+                elif len(paths) != len(set(paths)):
+                    output_errors.append("Repair returned duplicate replacement paths")
+                outside = sorted(set(paths) - allowed)
+                if outside:
+                    output_errors.append(
+                        "Repair attempted to modify paths outside its failure task: "
+                        + ", ".join(outside)
+                    )
+                if output_errors:
+                    rationale = str(repair.get("rationale", "")).strip()
+                    rejection_message = "\n".join(output_errors)
+                    if rationale:
+                        rejection_message += (
+                            "\nRejected candidate rationale (the candidate was not published): "
+                            + rationale
+                        )
+                    rejected_feedback = _failed_check(
+                        "repair-candidate-rejected",
+                        rejection_message,
+                        sorted(allowed),
+                        stage="repair",
+                    )
+                    before_content_hashes = content_hashes(current)
+                    workspace.write_metadata_json(
+                        f"iterations/repair-{repairs_used}.json",
+                        {
+                            "outcome": "rejected",
+                            "stop_reason": None,
+                            "rationale": repair["rationale"],
+                            "allowed_paths": sorted(allowed),
+                            "replaced_paths": sorted(paths),
+                            "changed_paths": [],
+                            "candidate_changed_paths": sorted(set(paths)),
+                            "regressions": output_errors,
+                            "candidate_replacements": replacements,
+                            "before_content_hashes": before_content_hashes,
+                            "after_content_hashes": before_content_hashes,
+                            "before_failure_fingerprint": before_failure_fingerprint,
+                            "after_failure_fingerprint": before_failure_fingerprint,
+                            **scoped_context.audit_record(),
+                        },
+                    )
+                    continue
                 replacements_by_path = {
                     item["path"]: item["content"] for item in replacements
                 }
@@ -376,23 +467,54 @@ class CleanRunner:
                         },
                     )
                     break
-                workspace.write_generated_files(replacements, allowed_paths=allowed)
-                generation_failures = [
+                candidate_generation_failures = [
                     check
                     for check in generation_failures
                     if not set(check["paths"]).intersection(paths)
                 ]
-                checks = self._validate(
-                    workspace,
-                    plan,
-                    generation_failures,
-                    run_executable_validation=not project_first,
-                    runtime_adapter=runtime_adapter,
-                    architecture=architecture,
-                    manifest=manifest,
-                    behavior_suite=behavior_suite,
-                    behavior_probe_design_failure=behavior_probe_design_failure,
+                def validate_candidate(candidate_workspace):
+                    return self._validate(
+                        candidate_workspace,
+                        plan,
+                        candidate_generation_failures,
+                        run_executable_validation=not project_first,
+                        runtime_adapter=runtime_adapter,
+                        architecture=architecture,
+                        manifest=manifest,
+                        behavior_suite=behavior_suite,
+                        behavior_probe_design_failure=behavior_probe_design_failure,
+                    )
+                candidate_checks, regressions = evaluate_repair_candidate(
+                    workspace, replacements, allowed, checks, validate_candidate,
                 )
+                if regressions:
+                    rejection_message = "\n".join(regressions)
+                    rationale = str(repair.get("rationale", "")).strip()
+                    if rationale:
+                        rejection_message += (
+                            "\nRejected candidate rationale (the candidate was not published): "
+                            + rationale
+                        )
+                    rejected_feedback = _failed_check(
+                        'repair-candidate-rejected', rejection_message, sorted(paths), stage='repair',
+                    )
+                    workspace.write_metadata_json(f'iterations/repair-{repairs_used}.json', {
+                        'outcome': 'rejected', 'stop_reason': None,
+                        'rationale': repair['rationale'], 'allowed_paths': sorted(allowed),
+                        'replaced_paths': sorted(paths), 'changed_paths': [],
+                        'candidate_changed_paths': changed_paths, 'regressions': regressions,
+                        'candidate_checks': candidate_checks, 'candidate_replacements': replacements,
+                        'before_content_hashes': before_content_hashes,
+                        'after_content_hashes': before_content_hashes,
+                        'before_failure_fingerprint': before_failure_fingerprint,
+                        'after_failure_fingerprint': before_failure_fingerprint,
+                        **scoped_context.audit_record(),
+                    })
+                    continue
+                workspace.write_generated_files(replacements, allowed_paths=allowed)
+                generation_failures = candidate_generation_failures
+                checks = candidate_checks
+                rejected_feedback = None
                 after_failure_fingerprint = failure_fingerprint(checks)
                 after_contents = {
                     path: workspace.read_generated_file(path)
@@ -426,6 +548,31 @@ class CleanRunner:
                         **scoped_context.audit_record(),
                     },
                 )
+            except ModelCallError as exc:
+                if exc.fatal:
+                    raise
+                before_content_hashes = content_hashes(current)
+                workspace.write_metadata_json(
+                    f"iterations/repair-{repairs_used}.json",
+                    {
+                        "outcome": "model-call-failed",
+                        "stop_reason": None,
+                        "error": _safe_error(exc),
+                        "error_kind": exc.kind,
+                        "allowed_paths": sorted(allowed),
+                        "changed_paths": [],
+                        "before_failure_fingerprint": before_failure_fingerprint,
+                        "after_failure_fingerprint": before_failure_fingerprint,
+                        "before_content_hashes": before_content_hashes,
+                        "after_content_hashes": before_content_hashes,
+                        **scoped_context.audit_record(),
+                    },
+                )
+                # A transient provider failure produced no candidate. Preserve
+                # the last validated project and its real failures; another
+                # budgeted attempt may retry without poisoning validation.
+                rejected_feedback = None
+                continue
             except Exception as exc:
                 generation_failures.append(
                     _failed_check(
@@ -486,11 +633,25 @@ class CleanRunner:
 
         for attempt in range(self.max_repairs + 1):
             adapter = select_runtime_adapter(architecture, readiness_executor=self.readiness_executor)
+            configurator = getattr(self, 'execution_configurator', None)
+            if configurator is not None:
+                self.behavior_prober, self.behavior_executor = configurator(adapter)
+                if (self.behavior_prober is None) != (self.behavior_executor is None):
+                    raise CleanBuildError('Adapter must supply both probe designer and executor, or neither')
+                if self.behavior_prober is not None and any(
+                    getattr(self.behavior_prober, field, None) is not None
+                    for field in ('source_reader', 'alias_map', 'artifact_verifier')
+                ):
+                    raise CleanBuildError('Adapter probe designer violates the Clean-room boundary')
             manifest = self._design_manifest(
                 architecture, runtime_adapter=adapter, validation_policy=validation_policy,
             )
             if self.behavior_prober is None:
                 return architecture, manifest, adapter, None, None
+            if not getattr(adapter, 'supports_behavior_probes', True):
+                return architecture, manifest, adapter, None, (
+                    f'Adapter {adapter.adapter_id} has no behavioral probe toolchain'
+                )
             try:
                 suite = self._design_behavior_probes(specification, architecture, manifest)
                 return architecture, manifest, adapter, suite, None
@@ -531,7 +692,9 @@ class CleanRunner:
             compatibility_mode=compatibility_mode,
             runtime_policy=validation_policy,
         )
+        attempts = []
         for repair_number in range(self.max_repairs + 1):
+            input_architecture = deepcopy(architecture)
             try:
                 architecture = CleanArchitectureSchema().load(architecture)
                 architecture = normalise_architecture(architecture)
@@ -541,15 +704,26 @@ class CleanRunner:
                     compatibility_mode=compatibility_mode,
                 )
             except Exception as exc:
+                attempts.append({
+                    "attempt": repair_number + 1,
+                    "input_to_validation": input_architecture,
+                    "architecture_under_review": deepcopy(architecture),
+                    "diagnostic": _safe_error(exc),
+                })
                 if repair_number >= self.max_repairs:
-                    raise
-                architecture = self.architect.revise(
-                    specification,
-                    architecture,
-                    _safe_error(exc),
-                    compatibility_mode=compatibility_mode,
-                    runtime_policy=validation_policy,
-                )
+                    raise _ArchitecturePlanningFailure(
+                        _safe_error(exc), architecture, attempts,
+                    ) from exc
+                try:
+                    architecture = self.architect.revise(
+                        specification, architecture, _safe_error(exc),
+                        compatibility_mode=compatibility_mode, runtime_policy=validation_policy,
+                    )
+                except Exception as revision_error:
+                    raise _ArchitecturePlanningFailure(
+                        f"Architecture revision failed: {_safe_error(revision_error)}",
+                        architecture, attempts,
+                    ) from revision_error
 
     def _design_manifest(
         self,
@@ -564,7 +738,9 @@ class CleanRunner:
             architecture,
             adapter_policy=validation_policy,
         )
+        attempts = []
         for repair_number in range(self.max_repairs + 1):
+            input_manifest = deepcopy(manifest)
             try:
                 manifest = CleanManifestSchema().load(manifest)
                 manifest = runtime_adapter.normalise_manifest(architecture, manifest)
@@ -576,8 +752,16 @@ class CleanRunner:
                 )
                 return manifest
             except Exception as exc:
+                attempts.append({
+                    "attempt": repair_number + 1,
+                    "input_to_adapter": input_manifest,
+                    "manifest_under_review": deepcopy(manifest),
+                    "diagnostic": _safe_error(exc),
+                })
                 if repair_number >= self.max_repairs:
-                    raise
+                    raise _ManifestPlanningFailure(
+                        _safe_error(exc), architecture, manifest, attempts,
+                    ) from exc
                 manifest = self.manifest_designer.revise(
                     architecture,
                     manifest,
@@ -1103,6 +1287,26 @@ def _only_behavior_failures(checks: list[dict[str, Any]]) -> bool:
     return bool(failures) and all(
         check["name"] == "python-behavior-probes" for check in failures
     )
+
+
+def _failing_behavior_probes(
+    checks: list[dict[str, Any]],
+    behavior_suite: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Select frozen probe sources named by current structured diagnostics."""
+    if behavior_suite is None:
+        return []
+    failing_ids = {
+        str(diagnostic.get("check_id", "")).rsplit(".", 1)[-1]
+        for check in checks
+        if check["status"] == "fail" and check["name"].endswith("behavior-probes")
+        for diagnostic in check.get("diagnostics", [])
+    }
+    return [
+        deepcopy(probe)
+        for probe in behavior_suite.get("probes", [])
+        if probe.get("probe_id") in failing_ids
+    ]
 
 
 def _compatibility_plan(

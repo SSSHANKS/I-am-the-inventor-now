@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+import re
 
 from packages.modules.clean.adapters.base import (
     ReadinessExecutor,
@@ -31,7 +32,7 @@ def select_runtime_adapter(
     readiness_executor: ReadinessExecutor | None = None,
 ) -> RuntimeAdapter:
     language = str(architecture["project_profile"]["language"])
-    if "python" in language.casefold():
+    if re.fullmatch(r"python(?:\s*\d+(?:\.\d+)*)?", language.strip(), re.IGNORECASE):
         return PythonRuntimeAdapter(readiness_executor=readiness_executor)
     return GenericRuntimeAdapter()
 

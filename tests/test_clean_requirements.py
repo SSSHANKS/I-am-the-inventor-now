@@ -116,6 +116,47 @@ def test_numbers_preconditions_when_they_are_the_only_requirement_statements():
     assert prepared.requirement_ids == ("FR-001", "FR-002")
 
 
+def test_reference_heading_containing_category_words_does_not_create_requirements():
+    specification = """## Error Handling
+
+### Context Manager Exception Safety
+
+Temporary connections are removed even if the managed block raises.
+
+### Open Questions on Cleanup
+
+Exact cleanup timing remains unknown.
+
+## Evidence References - Garbage Collection and Error Handling
+
+- EV-020: Evidence for exception cleanup.
+"""
+
+    prepared = prepare_specification(specification)
+
+    assert prepared.requirement_ids == ("EH-001",)
+    assert "EH-001: Temporary connections are removed" in prepared.text
+    assert "Exact cleanup timing remains unknown." in prepared.text
+    assert "- EV-020: Evidence for exception cleanup." in prepared.text
+
+
+def test_gap_subsection_resets_inherited_requirement_category():
+    specification = """## Functional Requirements
+
+Provide stable lookup behavior.
+
+### Gap: Namespace Collisions
+
+Collision behavior requires further verification.
+"""
+
+    prepared = prepare_specification(specification)
+
+    assert prepared.requirement_ids == ("FR-001",)
+    assert "FR-001: Provide stable lookup behavior." in prepared.text
+    assert "FR-002" not in prepared.text
+
+
 def test_rejects_specification_without_traceable_requirements():
     with pytest.raises(RequirementCatalogueError, match="no formal requirement IDs"):
         prepare_specification("# Notes\n\nSome background text.\n")

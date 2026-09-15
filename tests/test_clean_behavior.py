@@ -85,6 +85,22 @@ def test_behavior_probe_suite_requires_complete_requirement_coverage():
         validate_behavior_probe_suite(suite, _architecture())
 
 
+def test_cross_capability_scenario_needs_one_suite_level_execution():
+    architecture = _architecture()
+    architecture["capabilities"] = [
+        {**architecture["capabilities"][0], "requirement_ids": ["FR-001"]},
+        {
+            **architecture["capabilities"][0],
+            "capability_id": "CAP-002",
+            "requirement_ids": ["AC-001"],
+        },
+    ]
+    suite = _suite()
+    suite["probes"][1]["capability_id"] = "CAP-002"
+
+    validate_behavior_probe_suite(suite, architecture)
+
+
 @pytest.mark.parametrize("result", ["hello", "wrong"])
 def test_partial_probes_execute_and_preserve_coverage_gap(tmp_path, result):
     workspace = CleanWorkspace(tmp_path / "output")
@@ -134,10 +150,18 @@ def test_design_retains_safe_probe_when_another_probe_is_unsafe():
             "only type, existence, or non-null assertions",
         ),
         (
+            "events = []\nassert len(events) >= 0\n",
+            "only type, existence, or non-null assertions",
+        ),
+        (
             "try:\n    raise ValueError()\nexcept Exception:\n    pass\nassert True\n",
             "unspecific exception",
         ),
         ("import os\nos.system('echo unsafe')\nassert True\n", "forbidden operation"),
+        (
+            "called = False\ndef callback():\n    nonlocal called\nassert called is False\n",
+            "not executable Python",
+        ),
     ],
 )
 def test_behavior_probe_suite_rejects_unsafe_or_non_observing_code(code, message):

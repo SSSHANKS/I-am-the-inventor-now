@@ -248,9 +248,24 @@ def validate_manifest(
 
     missing_providers = sorted(set(contracts) - set(providers))
     if missing_providers:
+        details = []
+        for contract_id in missing_providers:
+            contract = contracts[contract_id]
+            owned = [
+                f"{task['path']} ({task['category']})" for task in files
+                if task['component_id'] == contract['component_id']
+            ]
+            details.append(
+                f"{contract_id}: {contract['qualified_name']}; owner={contract['component_id']}; "
+                f"declaration={contract['declaration']!r}; owned files={owned}"
+            )
         raise CleanManifestError(
             "Manifest does not provide architecture contracts: "
             + ", ".join(missing_providers)
+            + ". " + " | ".join(details)
+            + ". Assign each contract to exactly one matching implementation file owned by its "
+            "component. Metadata and documentation cannot provide executable contracts; "
+            "normalization removes their provides claims. Do not delete architecture contracts."
         )
     duplicate_providers = {
         contract_id: provider_paths

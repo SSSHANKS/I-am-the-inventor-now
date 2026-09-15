@@ -24,6 +24,7 @@ class CleanRepairAgent(BaseAgent):
         attempt_number: int = 1,
         related_files: dict[str, str] | None = None,
         omitted_related_paths: list[str] | None = None,
+        failing_behavior_probes: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         prompt = (
             "<clean_repair_request>\n"
@@ -45,6 +46,9 @@ class CleanRepairAgent(BaseAgent):
             "<sanitized_failures>\n"
             f"{json.dumps(failures, ensure_ascii=False, indent=2)}\n"
             "</sanitized_failures>\n"
+            "<failing_behavior_probes_read_only>\n"
+            f"{json.dumps(failing_behavior_probes or [], ensure_ascii=False, indent=2)}\n"
+            "</failing_behavior_probes_read_only>\n"
             "<current_generated_files>\n"
             f"{json.dumps(current_files, ensure_ascii=False, indent=2)}\n"
             "</current_generated_files>\n"

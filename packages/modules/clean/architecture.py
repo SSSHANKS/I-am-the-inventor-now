@@ -248,6 +248,14 @@ def _align_python_contract_declaration_names(architecture: dict[str, Any]) -> No
                 )
             contract["declaration"] = aligned
             continue
+        if declaration.lstrip().startswith(("def ", "async def ")):
+            contract["declaration"] = re.sub(
+                r"^(\s*(?:async\s+)?def\s+)[A-Za-z_][A-Za-z0-9_]*",
+                rf"\g<1>{expected}",
+                declaration,
+                count=1,
+            )
+            continue
         contract["declaration"] = re.sub(
             r"^(\s*)[A-Za-z_][A-Za-z0-9_]*(?=\s*\()",
             rf"\g<1>{expected}",
@@ -385,7 +393,6 @@ def validate_architecture(
         allocated_scenarios,
         "capability scenarios",
     )
-
     referenced_components: set[str] = set()
     for capability in capabilities.values():
         component_ids = _unique_references(
@@ -493,13 +500,29 @@ def validate_architecture(
             f"proposal {proposal['proposal_id']} components",
         )
     _validate_behavior_rules(architecture, statements)
+    _validate_observable_auxiliary_contracts(architecture)
     return architecture
 
 
 def _validate_behavior_rules(architecture: dict[str, Any], statements: dict[str, str]) -> None:
     """Check provenance, not the semantic truth of a model's interpretation."""
     proposals = {item["proposal_id"]: item for item in architecture["proposals"]}
-    normalize = lambda text: " ".join(text.split())
+    def normalize(text: str) -> str:
+        normalized = " ".join(text.split())
+        normalized = re.sub(
+            r"\bEvidence\s*:\s*(?=EV-\d+)",
+            "",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        normalized = re.sub(
+            r"\(\s*EV-\d+(?:\s*,\s*EV-\d+)*\s*\)",
+            "",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        normalized = re.sub(r"\s+([,.;:!?])", r"\1", normalized)
+        return " ".join(normalized.split())
     for contract in architecture["contracts"]:
         for rule in contract.get("behavior_rules", []):
             label = f"Contract {contract['contract_id']} {rule['aspect']} behavior rule"
@@ -511,15 +534,33 @@ def _validate_behavior_rules(architecture: dict[str, Any], statements: dict[str,
             if rule["source"] == "specification":
                 if "proposal_id" in rule:
                     raise CleanArchitectureError(f"{label} cannot label a proposal as specification evidence")
-                statement = normalize(rule["statement"])
-                if not statement or not all(
-                    statement in normalize(statements.get(requirement_id, "")) for requirement_id in ids
-                ):
+                # New rules separate their synthesis from literal source evidence.
+                # Legacy rules still treat the statement itself as their excerpt.
+                evidence = rule.get("evidence", [
+                    {"requirement_id": requirement_id, "excerpt": rule["statement"]}
+                    for requirement_id in sorted(ids)
+                ])
+                evidence_ids = [item["requirement_id"] for item in evidence]
+                if set(evidence_ids) != ids or len(evidence_ids) != len(ids):
                     raise CleanArchitectureError(
-                        f"{label} must quote a verbatim excerpt from every referenced requirement; "
+                        f"{label} evidence must reference each claimed requirement exactly once; "
+                        f"claimed={sorted(ids)}, evidence={evidence_ids}"
+                    )
+                unmatched = [
+                    item["requirement_id"] for item in evidence
+                    if not normalize(item["excerpt"]) or normalize(item["excerpt"]) not in
+                    normalize(statements.get(item["requirement_id"], ""))
+                ]
+                if unmatched:
+                    raise CleanArchitectureError(
+                        f"{label} evidence must quote a verbatim excerpt from its own requirement; "
+                        f"unmatched={unmatched}; statement={rule['statement']!r}. "
+                        "Supply separate evidence excerpts for combined requirements; "
                         "record unstated choices as clean proposals instead"
                     )
             elif rule["source"] == "clean-proposal":
+                if "evidence" in rule:
+                    raise CleanArchitectureError(f"{label} cannot label a proposal as specification evidence")
                 proposal = proposals.get(rule.get("proposal_id"))
                 if not proposal or proposal["source"] != "clean-proposal":
                     raise CleanArchitectureError(f"{label} requires an existing clean-proposal ledger entry")
@@ -529,6 +570,139 @@ def _validate_behavior_rules(architecture: dict[str, Any], statements: dict[str,
                     raise CleanArchitectureError(f"{label} must match the proposal's chosen_value")
             else:
                 raise CleanArchitectureError(f"{label} has unknown provenance")
+
+
+def _validate_observable_auxiliary_contracts(architecture: dict[str, Any]) -> None:
+    """Require a distinct contract when the specification names a distinct event channel."""
+    contracts = architecture["contracts"]
+    capabilities = architecture["capabilities"]
+    dependencies = {
+        component["component_id"]: set(component["depends_on"])
+        for component in architecture["components"]
+    }
+
+    def dependency_reaches(source: str, target: str) -> bool:
+        pending = list(dependencies.get(source, ()))
+        visited: set[str] = set()
+        while pending:
+            current = pending.pop()
+            if current == target:
+                return True
+            if current not in visited:
+                visited.add(current)
+                pending.extend(dependencies.get(current, ()))
+        return False
+
+    def linked(producer: dict[str, Any], observer: dict[str, Any], requirement_id: str) -> bool:
+        return (
+            observer["contract_id"] != producer["contract_id"]
+            and requirement_id in observer["requirement_ids"]
+            and (
+                observer["component_id"] == producer["component_id"]
+                or any(
+                    requirement_id in capability["requirement_ids"]
+                    and producer["component_id"] in capability["component_ids"]
+                    and observer["component_id"] in capability["component_ids"]
+                    and (
+                        dependency_reaches(producer["component_id"], observer["component_id"])
+                        or dependency_reaches(observer["component_id"], producer["component_id"])
+                    )
+                    for capability in capabilities
+                )
+            )
+        )
+
+    def exposes_interaction(
+        producer: dict[str, Any], observer: dict[str, Any], requirement_id: str
+    ) -> bool:
+        """Recognize a declared registration, injection, or observer-access path."""
+        observer_declaration = str(observer.get("declaration", ""))
+
+        def registration_shape(declaration: str) -> bool:
+            folded = declaration.casefold()
+            participant = re.search(
+                r"\b(callback|callable|consumer|function|handler|listener|observer|subscriber)\b"
+                r"|\bfn(?:once|mut)?\b",
+                folded,
+            )
+            action = re.search(
+                r"\b(add|attach|bind|connect|listen|observe|on|register|subscribe|watch)\w*\b",
+                folded,
+            )
+            return bool(participant and action)
+
+        if registration_shape(observer_declaration):
+            return True
+        observer_name = str(observer.get("qualified_name", "")).rsplit(".", 1)[-1]
+        if observer_name and re.search(
+            rf"\b{re.escape(observer_name)}\b", str(producer.get("declaration", ""))
+        ):
+            return True
+        related_components = {producer["component_id"], observer["component_id"]}
+        return any(
+            bridge["contract_id"] not in {
+                producer["contract_id"], observer["contract_id"]
+            }
+            and bridge["component_id"] in related_components
+            and requirement_id in bridge["requirement_ids"]
+            and (
+                re.search(
+                    rf"\b{re.escape(observer_name)}\b",
+                    str(bridge.get("declaration", "")),
+                )
+                or registration_shape(str(bridge.get("declaration", "")))
+            )
+            for bridge in contracts
+        )
+
+    missing: list[tuple[str, str, str]] = []
+    for contract in contracts:
+        for rule in contract.get("behavior_rules", []):
+            evidence_by_requirement = {
+                item["requirement_id"]: str(item["excerpt"])
+                for item in rule.get("evidence", [])
+            }
+            for requirement_id in rule["requirement_ids"]:
+                statement = evidence_by_requirement.get(
+                    requirement_id, str(rule["statement"])
+                ).casefold()
+                distinct_channel = (
+                    any(
+                        word in statement
+                        for word in ("auxiliary", "dedicated", "distinct", "secondary")
+                    )
+                    and any(
+                        word in statement
+                        for word in ("event", "signal", "notification")
+                    )
+                )
+                if not distinct_channel:
+                    continue
+                if any(
+                    linked(contract, other, requirement_id)
+                    and exposes_interaction(contract, other, requirement_id)
+                    for other in contracts
+                ):
+                    continue
+                missing.append(
+                    (requirement_id, contract["contract_id"], contract["component_id"])
+                )
+    if missing:
+        rendered = ", ".join(
+            f"{requirement_id} ({contract_id}/{component_id})"
+            for requirement_id, contract_id, component_id in missing
+        )
+        raise CleanArchitectureError(
+            "Observable auxiliary or lifecycle requirements must be jointly claimed by "
+            f"a producing operation contract and a separate observer contract: {rendered}. "
+            "Keep each listed requirement on the producer and also claim it on the observer; "
+            "do not transfer it from one contract to the other. The observer may belong to "
+            "another component when both components share the capability and their dependency "
+            "graph supports the interaction. Declare a public interaction path for observer "
+            "registration, injection, or access; a disconnected callback class is insufficient. "
+            "Record an unstated name or shape as a clean "
+            "proposal instead of treating ordinary operation handlers as lifecycle observers"
+        )
 
 
 def _unique_by_id(

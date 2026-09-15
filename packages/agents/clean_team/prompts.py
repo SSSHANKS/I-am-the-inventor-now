@@ -39,7 +39,10 @@ EH, and AC requirement to at least one capability and one responsible component.
 The request includes authoritative requirement inventories: every ID in
 `required_behavior_ids` must appear in both capability and component allocation, and
 every ID in `required_scenario_ids` must appear in capability scenario evidence.
-Omitting an inventory ID makes the architecture invalid.
+Omitting an inventory ID makes the architecture invalid. A TC scenario may inform
+multiple capabilities when it genuinely crosses them; it needs to be exercised once
+by a suitable probe across the complete behavior suite, not duplicated mechanically
+for every capability that cites it.
 Give each dependency a scope: build, runtime, or both. Build backends and build-only
 tools belong in build requirements, not runtime dependencies. Use both only when
 the reconstructed application also needs that package while running.
@@ -56,12 +59,27 @@ Label assignment declarations as `constant`, including module export declaration
 as `__all__ = [...]`; never label an assignment as a function.
 Attach behavior_rules to each contract for the applicable observable semantics, not
 just its signature. Each rule has aspect, statement, requirement_ids, and source.
-For source=specification, statement must be a verbatim excerpt (whitespace may vary)
-from every referenced requirement, and the IDs must belong to that contract. Do not
-paraphrase, strengthen, or invent details and label them as specification evidence.
+For source=specification, statement may synthesize the cited requirements without
+adding or strengthening behavior. Supply evidence with exactly one entry for each
+requirement_id: {{"requirement_id": "FR-001", "excerpt": "literal supporting text"}}.
+Each excerpt must appear verbatim in its own requirement (whitespace may vary).
+Different requirements can have different excerpts. All IDs must belong to the
+contract. Valid citations alone do not prove the synthesis: check that each stated
+behavior follows from the evidence, and never invent details as specification facts.
 For source=clean-proposal, include proposal_id referencing a clean-proposal ledger
 entry for the contract's component; statement must equal that entry's chosen_value.
+Omit evidence for clean-proposal rules; they are choices, not source quotations.
 Keep genuinely undecidable behavior in unresolved_gaps instead of inventing a rule.
+When the specification requires auxiliary, dedicated, or distinct lifecycle notifications
+that observers can receive, declare a separate public contract for observing that channel.
+Do not reinterpret ordinary handlers as lifecycle observers. If the observer API name or
+shape is unstated, choose it through a clean-proposal and use it consistently. The observer
+contract may live in a separate component when it shares the capability and the component
+dependency graph supports the interaction. Claim every lifecycle requirement supported by
+that contract on both the producing operation contract and the observer contract; this
+deliberate shared claim connects production with observation, so never move the requirement
+from the producer to the observer. Declare how callers register or access the observation
+channel rather than defining an otherwise disconnected callback type.
 In particular, settle these details when relevant:
 - arguments: positional and keyword forwarding, reserved context arguments, defaults;
 - results: callback return values versus callback side effects, result aggregation,
@@ -89,7 +107,7 @@ Return only JSON with exactly this shape (all fields required):
   "project_profile": {{"kind": "library | cli | application | service | tool | mixed", "language": "Python", "runtime_version": "3.12", "build_system": "setuptools", "layout": "src", "compatibility_mode": "drop-in | renamed"}},
   "capabilities": [{{"capability_id": "CAP-001", "purpose": "...", "requirement_ids": ["FR-001"], "scenario_ids": ["TC-001"], "component_ids": ["CMP-001"]}}],
   "components": [{{"component_id": "CMP-001", "purpose": "...", "kind": "domain | interface | adapter | entrypoint | configuration", "requirement_ids": ["FR-001"], "depends_on": []}}],
-  "contracts": [{{"contract_id": "SYM-001", "component_id": "CMP-001", "qualified_name": "package.symbol", "kind": "function", "declaration": "symbol(value: str) -> str", "visibility": "public", "requirement_ids": ["FR-001"], "behavior_rules": [{{"aspect": "arguments | results | errors | input-format | state | lifetime", "statement": "verbatim requirement excerpt or proposal chosen_value", "requirement_ids": ["FR-001"], "source": "specification | clean-proposal"}}]}}],
+  "contracts": [{{"contract_id": "SYM-001", "component_id": "CMP-001", "qualified_name": "package.symbol", "kind": "function", "declaration": "symbol(value: str) -> str", "visibility": "public", "requirement_ids": ["FR-001"], "behavior_rules": [{{"aspect": "arguments | results | errors | input-format | state | lifetime", "statement": "behavior supported by the evidence", "requirement_ids": ["FR-001"], "source": "specification", "evidence": [{{"requirement_id": "FR-001", "excerpt": "literal supporting text from FR-001"}}]}}]}}],
   "entry_points": [{{"entry_point_id": "EP-001", "component_id": "CMP-001", "description": "...", "contract_ids": ["SYM-001"]}}],
   "dependency_decisions": [{{"name": "dependency", "purpose": "...", "required": true, "scope": "build | runtime | both", "source": "specification | adapter-baseline | clean-proposal", "requirement_ids": ["FR-001"]}}],
   "proposals": [{{"proposal_id": "PROP-001", "field": "project_profile.layout", "chosen_value": "src", "reason": "...", "source": "adapter-baseline | clean-proposal", "affected_component_ids": ["CMP-001"], "affects_public_compatibility": false}}],
@@ -270,14 +288,29 @@ Treat each structured diagnostic as an exact repair obligation. Its diagnostic I
 check ID, expected value, actual value, contract IDs, and requirement IDs are
 authoritative. Resolve the reported mismatch in the replacement itself; a rationale
 does not count as resolution. Never return content identical to the current file.
-The repair attempt number is included in the prompt. On later attempts, assume an
-earlier replacement changed the file but did not resolve the listed diagnostics; compare
-every expected and actual contract field literally before returning the next replacement.
+When a frozen failing behavior probe is supplied, treat its source as a read-only
+executable oracle. Trace its complete setup, call, and assertions together with the
+corresponding requirement and behavior rule. Do not modify, weaken, or reproduce the
+probe in the project. Do not guess a callback protocol from only the final traceback.
+The repair attempt number is included in the prompt. On later attempts, inspect
+repair-candidate-rejected feedback carefully. A rejected candidate was never published,
+so current_generated_files still contain the last accepted version. Use the rejected
+rationale and regressions to choose a materially different fix; do not repeat the same
+approach with cosmetic edits.
 Repair the underlying behavior, not only the first exception shown in a traceback.
-Inspect all current tests and related cases for the failed operation, and handle the
+Inspect all supplied probes, current tests, and related cases for the failed operation, and handle the
 full stated input and failure category without weakening assertions or deleting tests.
 When tests are read-only related context, preserve them as the behavioral oracle and
 repair the allowed implementation files to satisfy them.
+Cluster failing probes by shared state, ownership, dispatch, and cleanup mechanisms before
+editing. Prefer one causal repair that resolves a cluster over independent assertion-shaped
+special cases. For weak-reference behavior, ensure every stored object graph is actually
+weak: a wrapper, callback, cleanup closure, cache, or inspection helper must not retain the
+referent strongly. Dereference only at the point of use, and preserve coroutine inspection
+without storing a strong copy of the callback. For context-managed registration, trace the
+same sender/fallback normalization through connect, dispatch, and disconnect, including
+exceptional exit. When sync and async handlers coexist, follow every explicit error rule;
+do not silence a required exception merely to return partial synchronous results.
 
 [Output]
 Return only JSON with exactly this shape:
@@ -316,7 +349,13 @@ sys.modules, import hooks), or load an alternative implementation. Temporary fil
 are input fixtures only, not substitute library code. Mock external boundaries only,
 never the public operation whose behavior the probe claims to verify. Every probe
 must exercise the actual generated project; missing implementation is a real failure.
-Use only interfaces declared by the architecture. Never invent private callback hooks
+Use only interfaces declared by the architecture. Never invent keyword parameters
+absent from a callable's declaration. Bind fixture calls
+to the declared positional, keyword-only, default, and variadic parameters. A decorator
+factory is called first with its configuration, then with the decorated callback;
+do not replace that protocol with an undeclared direct-registration argument.
+Never ask production repair to change a signature merely to fit a mistaken probe.
+Never invent private callback hooks
 or assign guessed internal attributes to make lifecycle observations. If a required
 behavior has no usable public contract, expose the contract gap rather than fabricate
 an implementation detail. Respect declared return values when using decorators.
@@ -325,6 +364,16 @@ checks; inline lambdas can be collected immediately. Use weak=False explicitly w
 the scenario calls for strong ownership. Test collection separately by deliberately
 releasing the retained reference. Derive expectations from callback return values:
 list.append returns None, not the item it appended.
+Keep independent behavior phases isolated. Use a fresh public object when a probe moves
+from synchronous to asynchronous dispatch, from one sender scope to another, or to a
+different expected listener set, unless the requirement explicitly tests cumulative
+state. Otherwise every earlier registration remains part of the setup and every exact
+result assertion must account for it. A universal or fallback listener must not be
+excluded from a specific-sender expectation when the assigned scenario says universal
+listeners run for any specific sender.
+For namespace, package-initialization, and export requirements, import the symbol through
+the declared public package root and exercise its public behavior. This makes a missing
+or broken export fail without relying only on hasattr, type, existence, or non-null checks.
 Never substitute assert True, literal tautologies, or an "or True" escape for a
 behavioral assertion. Do not implement the tested behavior in a subclass override
 or replacement operation and then assert that your own code ran. Observe the actual
@@ -338,6 +387,10 @@ also carry explicitly recorded Clean choices for details the specification leave
 open; use those same choices for fixtures and expectations, without claiming they
 describe the original project. Never independently choose a conflicting format,
 argument convention, or callback-result shape. Never invent an output
+Explicit error rules constrain every probe, not only the probe assigned to that error
+requirement. For example, when synchronous use with an asynchronous callable must
+raise, result probes must exercise synchronous-only and asynchronous paths separately;
+they cannot demand partial synchronous results from the prohibited mixed call.
 template, separator, prefix, suffix, registry entry, default value, command name, option
 name, or exception text that it does not state. An example input chosen by the probe does
 not authorize inventing an exact formatted output for that input. Use the weakest strong

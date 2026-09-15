@@ -13,7 +13,6 @@ from config import ConfigError, load_environment, load_settings, setup_logging
 from packages.agents.base_agent import StubTextClient
 from packages.agents.clean_team import (
     CleanArchitectAgent,
-    CleanBehaviorProbeAgent,
     CleanBuilderAgent,
     CleanManifestAgent,
     CleanRepairAgent,
@@ -23,8 +22,6 @@ from packages.modules.clean import (
     CleanRunner,
     WorkspaceError,
 )
-from packages.modules.clean.adapters.python_readiness import LocalPythonReadinessExecutor
-from packages.modules.clean.behavior import LocalPythonBehaviorProbeExecutor
 from packages.modules.handoff import HandoffError
 
 
@@ -92,17 +89,13 @@ def run(args: argparse.Namespace):
             kwargs["chat_client"] = StubTextClient(_stubbed_clean_reply)
         return kwargs
 
-    readiness_executor = None
-    behavior_executor = None
-    behavior_prober = None
+    execution_configurator = None
     if args.execute_generated_code:
-        readiness_executor = LocalPythonReadinessExecutor(
-            timeout_seconds=args.validation_timeout
-        )
-        behavior_executor = LocalPythonBehaviorProbeExecutor(
-            timeout_seconds=args.validation_timeout
-        )
-        behavior_prober = CleanBehaviorProbeAgent(**agent_kwargs("clean_planner"))
+        def execution_configurator(adapter):
+            return adapter.configure_execution(
+                timeout_seconds=args.validation_timeout,
+                agent_options=agent_kwargs("clean_planner"),
+            )
 
     runner = CleanRunner(
         None,
@@ -110,9 +103,7 @@ def run(args: argparse.Namespace):
         CleanRepairAgent(**agent_kwargs("clean_repair")),
         architect=CleanArchitectAgent(**agent_kwargs("clean_planner")),
         manifest_designer=CleanManifestAgent(**agent_kwargs("clean_planner")),
-        behavior_prober=behavior_prober,
-        behavior_executor=behavior_executor,
-        readiness_executor=readiness_executor,
+        execution_configurator=execution_configurator,
         max_repairs=args.clean_max_repairs,
         syntax_checks=not args.no_validate,
     )

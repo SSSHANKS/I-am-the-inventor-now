@@ -22,6 +22,9 @@ class ReadinessExecutor(Protocol):
 class RuntimeAdapter(Protocol):
     adapter_id: str
     policy_version: int
+    supports_behavior_probes: bool
+
+    def configure_execution(self, *, timeout_seconds: float, agent_options: dict[str, Any]) -> tuple[Any, Any]: ...
 
     def planning_policy(self, *, syntax_checks: bool) -> dict[str, Any]: ...
 

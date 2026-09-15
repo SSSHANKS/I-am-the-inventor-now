@@ -237,7 +237,10 @@ def _packaging_check(
         if not isinstance(packages_value, (dict, list)):
             issues.append("[tool.setuptools].packages must be an array or table")
         where = find.get("where", []) if isinstance(find, dict) else []
-        if package_dir.get("") != "src" and "src" not in where:
+        automatic_discovery = not any(
+            key in setuptools for key in ("packages", "py-modules", "package-dir")
+        )
+        if not automatic_discovery and package_dir.get("") != "src" and "src" not in where:
             issues.append("setuptools package discovery does not target the src directory")
         py_modules = setuptools.get("py-modules", []) if isinstance(setuptools, dict) else []
         if not isinstance(py_modules, list):

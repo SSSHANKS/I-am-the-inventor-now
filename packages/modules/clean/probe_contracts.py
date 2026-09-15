@@ -6,6 +6,13 @@ checker and does not infer a missing API from the original implementation.
 from __future__ import annotations
 
 import ast
+import re
+
+from packages.modules.clean.adapters.python_probe_calls import (
+    call_binding_error,
+    expects_binding_typeerror,
+    expects_exception,
+)
 
 
 class ProbeContractError(ValueError):
@@ -18,15 +25,31 @@ class ProbeArchitectureError(ProbeContractError):
 
 def validate_probe_contracts(code: str, contracts: list[dict]) -> None:
     tree = ast.parse(code)
+    parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
     classes = {}
+    class_contracts = {}
+    functions = {}
     for contract in contracts:
         try:
             declaration = ast.parse(contract.get('declaration', ''))
         except SyntaxError:
-            continue  # Architecture validation owns malformed declarations.
+            try:
+                declaration = ast.parse('def ' + contract.get('declaration', '') + ': ...')
+            except SyntaxError:
+                continue  # Architecture validation owns malformed declarations.
+        if contract.get('kind') in {'function', 'decorator'} and not any(
+            isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) for item in declaration.body
+        ):
+            try:
+                declaration = ast.parse('def ' + contract.get('declaration', '') + ': ...')
+            except SyntaxError:
+                continue
         for item in declaration.body:
             if isinstance(item, ast.ClassDef):
                 classes[contract['qualified_name']] = item
+                class_contracts[contract['qualified_name']] = contract
+            elif isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                functions[contract['qualified_name']] = item
 
     aliases = {}
     instances = {}
@@ -156,6 +179,22 @@ def validate_probe_contracts(code: str, contracts: list[dict]) -> None:
                     'public contract, not an invented implementation hook'
                 )
         if isinstance(node, ast.Call):
+            signature = method(node.func)
+            bound_call = signature is not None
+            if signature is None:
+                constructor = class_name(node.func)
+                if constructor:
+                    signature = members(constructor).get('__init__')
+                    bound_call = True
+                else:
+                    signature = functions.get(name(node.func))
+            if isinstance(signature, (ast.FunctionDef, ast.AsyncFunctionDef)) and not expects_binding_typeerror(node, parents):
+                error = call_binding_error(node, signature, bound=bound_call)
+                if error:
+                    raise ProbeContractError(
+                        f'Probe call {name(node.func)} at line {node.lineno} is incompatible: {error}. '
+                        'Correct the probe arguments; do not change production signatures to satisfy this call.'
+                    )
             if name(node.func) in {'setattr', 'getattr', 'hasattr'} and len(node.args) >= 2:
                 key = owner(node.args[0])
                 attr = node.args[1]
@@ -199,3 +238,98 @@ def validate_probe_contracts(code: str, contracts: list[dict]) -> None:
                         f'Decorator {name(decorator)} declares a None return. Review the approved '
                         'decorator requirement and its callable-preserving public contract before generation.'
                     )
+
+    _validate_sync_async_error_contracts(
+        tree, parents, classes, class_contracts, instances, members, owner,
+    )
+
+
+def _validate_sync_async_error_contracts(
+    tree: ast.Module,
+    parents: dict[ast.AST, ast.AST],
+    classes: dict[str, ast.ClassDef],
+    class_contracts: dict[str, dict],
+    instances: dict[str, str],
+    members,
+    owner,
+) -> None:
+    """Reject probes that contradict an explicit sync/async error boundary."""
+    constraints: dict[str, tuple[set[str], str]] = {}
+    for key, contract in class_contracts.items():
+        exception_name = None
+        for rule in contract.get("behavior_rules", []):
+            statement = str(rule.get("statement", ""))
+            folded = statement.casefold()
+            # The behavior itself is authoritative. An architect may place a
+            # combined result/error rule under ``results`` even though it also
+            # states an explicit exception boundary.
+            if "synchronous" not in folded or not (
+                "asynchronous" in folded or "coroutine" in folded
+            ):
+                continue
+            match = re.search(r"\b[A-Z][A-Za-z0-9_]*(?:Error|Exception)\b", statement)
+            if match:
+                exception_name = match.group(0)
+                break
+        if exception_name is None:
+            continue
+        declared = members(key)
+        async_names = {
+            name for name, node in declared.items() if isinstance(node, ast.AsyncFunctionDef)
+        }
+        sync_counterparts = {
+            name
+            for name, node in declared.items()
+            if isinstance(node, ast.FunctionDef)
+            and (f"{name}_async" in async_names or f"async_{name}" in async_names)
+        }
+        if sync_counterparts:
+            constraints[key] = (sync_counterparts, exception_name)
+    if not constraints:
+        return
+
+    async_functions = {
+        node.name for node in ast.walk(tree) if isinstance(node, ast.AsyncFunctionDef)
+    }
+    registered: set[str] = set()
+    calls = sorted(
+        (node for node in ast.walk(tree) if isinstance(node, ast.Call)),
+        key=lambda node: (node.lineno, node.col_offset),
+    )
+    for call in calls:
+        if not isinstance(call.func, ast.Attribute) or not isinstance(call.func.value, ast.Name):
+            continue
+        variable = call.func.value.id
+        key = owner(call.func.value)
+        if key not in constraints:
+            continue
+        declaration = members(key).get(call.func.attr)
+        if not isinstance(declaration, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        arguments = [*declaration.args.posonlyargs, *declaration.args.args]
+        if arguments and arguments[0].arg in {"self", "cls"}:
+            arguments = arguments[1:]
+        bound = dict(zip((item.arg for item in arguments), call.args))
+        bound.update({item.arg: item.value for item in call.keywords if item.arg})
+        registers_async = any(
+            isinstance(value, ast.Name)
+            and value.id in async_functions
+            and argument.annotation is not None
+            and ast.unparse(argument.annotation).casefold() in {"callable", "typing.callable"}
+            for argument in arguments
+            for value in [bound.get(argument.arg)]
+        )
+        if registers_async:
+            registered.add(variable)
+            continue
+        sync_methods, exception_name = constraints[key]
+        if (
+            variable in registered
+            and call.func.attr in sync_methods
+            and not expects_exception(call, parents, exception_name)
+        ):
+            raise ProbeContractError(
+                f"Probe calls synchronous {key}.{call.func.attr} after registering an async "
+                f"callable, but the contract requires {exception_name}; explicitly assert that "
+                "error or use the declared async operation"
+            )

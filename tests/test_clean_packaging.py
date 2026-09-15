@@ -326,6 +326,18 @@ def test_python_packaging_reports_packages_array_without_crashing(tmp_path):
     assert "package discovery does not target the src directory" in check["message"]
 
 
+def test_python_packaging_allows_automatic_src_discovery(tmp_path):
+    content = _pyproject().replace('[tool.setuptools.packages.find]\nwhere = ["src"]', '')
+    checks = validate_python_packaging(_workspace(tmp_path, content), _architecture(), _manifest())
+    assert _by_name(checks, 'python-packaging')['status'] == 'pass'
+
+
+def test_python_packaging_still_rejects_explicit_wrong_discovery(tmp_path):
+    content = _pyproject().replace('where = ["src"]', 'where = ["wrong"]')
+    checks = validate_python_packaging(_workspace(tmp_path, content), _architecture(), _manifest())
+    assert _by_name(checks, 'python-packaging')['status'] == 'fail'
+
+
 def test_python_packaging_rejects_unplanned_readme_reference(tmp_path):
     pyproject = _pyproject().replace(
         'requires-python = ">=3.12"',

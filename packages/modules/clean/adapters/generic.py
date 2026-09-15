@@ -13,6 +13,11 @@ class GenericRuntimeAdapter:
 
     adapter_id = "generic-structure"
     policy_version = 1
+    supports_behavior_probes = False
+
+    def configure_execution(self, *, timeout_seconds: float, agent_options: dict[str, Any]) -> tuple[None, None]:
+        # Unsupported runtimes must never receive a Python executable or prober.
+        return None, None
     _validators = frozenset({"manifest-integrity", "utf8-text"})
 
     def planning_policy(self, *, syntax_checks: bool) -> dict[str, Any]:

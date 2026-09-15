@@ -106,6 +106,160 @@ def test_clean_architecture_schema_and_traceability_accept_coherent_design():
     )
 
 
+def test_auxiliary_observer_behavior_requires_a_separate_contract():
+    specification = SPECIFICATION.replace(
+        "Return a greeting for the supplied name.",
+        "Specific auxiliary signals notify observers after lifecycle operations.",
+    )
+    architecture = _architecture()
+    architecture["contracts"][0]["behavior_rules"] = [
+        {
+            "aspect": "state",
+            "statement": (
+                "Specific auxiliary signals notify observers after lifecycle operations."
+            ),
+            "requirement_ids": ["FR-001"],
+            "source": "specification",
+            "evidence": [
+                {
+                    "requirement_id": "FR-001",
+                    "excerpt": (
+                        "Specific auxiliary signals notify observers after lifecycle operations."
+                    ),
+                }
+            ],
+        }
+    ]
+
+    with pytest.raises(CleanArchitectureError, match="jointly claimed"):
+        validate_architecture(architecture, specification)
+
+    architecture["contracts"].append(
+        {
+            "contract_id": "SYM-002",
+            "component_id": "CMP-001",
+            "qualified_name": "greeting.observe_lifecycle",
+            "kind": "function",
+            "declaration": "observe_lifecycle(callback: callable) -> None",
+            "visibility": "public",
+            "requirement_ids": ["FR-001"],
+        }
+    )
+    validate_architecture(architecture, specification)
+
+
+def test_auxiliary_observer_contract_may_use_a_shared_capability_component():
+    specification = SPECIFICATION.replace(
+        "Return a greeting for the supplied name.",
+        "Dedicated lifecycle events notify observers after operations.",
+    )
+    architecture = _architecture()
+    architecture["contracts"][0]["behavior_rules"] = [
+        {
+            "aspect": "state",
+            "statement": "Dedicated lifecycle events notify observers after operations.",
+            "requirement_ids": ["FR-001"],
+            "source": "specification",
+            "evidence": [{
+                "requirement_id": "FR-001",
+                "excerpt": "Dedicated lifecycle events notify observers after operations.",
+            }],
+        }
+    ]
+    architecture["components"].append({
+        "component_id": "CMP-002",
+        "purpose": "Expose lifecycle observations.",
+        "kind": "interface",
+        "requirement_ids": ["FR-001"],
+        "depends_on": [],
+    })
+    architecture["capabilities"][0]["component_ids"].append("CMP-002")
+    architecture["contracts"].append({
+        "contract_id": "SYM-002",
+        "component_id": "CMP-002",
+        "qualified_name": "observing.observe_lifecycle",
+        "kind": "function",
+        "declaration": "observe_lifecycle(callback: callable) -> None",
+        "visibility": "public",
+        "requirement_ids": ["FR-001"],
+    })
+
+    with pytest.raises(CleanArchitectureError, match="jointly claimed"):
+        validate_architecture(architecture, specification)
+
+    architecture["components"][0]["depends_on"] = ["CMP-002"]
+    validate_architecture(architecture, specification)
+
+
+def test_auxiliary_observer_contract_requires_a_public_interaction_path():
+    specification = SPECIFICATION.replace(
+        "Return a greeting for the supplied name.",
+        "Dedicated lifecycle events notify observers after operations.",
+    )
+    architecture = _architecture()
+    architecture["contracts"][0]["behavior_rules"] = [{
+        "aspect": "state",
+        "statement": "Dedicated lifecycle events notify observers after operations.",
+        "requirement_ids": ["FR-001"],
+        "source": "specification",
+        "evidence": [{
+            "requirement_id": "FR-001",
+            "excerpt": "Dedicated lifecycle events notify observers after operations.",
+        }],
+    }]
+    architecture["contracts"].append({
+        "contract_id": "SYM-002",
+        "component_id": "CMP-001",
+        "qualified_name": "greeting.LifecycleObserver",
+        "kind": "class",
+        "declaration": "class LifecycleObserver:\n    def update(self, event: object) -> None: ...",
+        "visibility": "public",
+        "requirement_ids": ["FR-001"],
+    })
+
+    with pytest.raises(CleanArchitectureError, match="interaction path"):
+        validate_architecture(architecture, specification)
+
+    architecture["contracts"][0]["declaration"] = (
+        "greet(name: str, observer: LifecycleObserver) -> str"
+    )
+    validate_architecture(architecture, specification)
+
+
+def test_combined_rule_does_not_make_unrelated_requirements_observer_contracts():
+    specification = SPECIFICATION.replace(
+        "Return a greeting for the supplied name.",
+        "Dedicated lifecycle events notify observers after operations.",
+    )
+    architecture = _architecture()
+    architecture["contracts"][0]["behavior_rules"] = [{
+        "aspect": "state",
+        "statement": (
+            "Dedicated lifecycle events notify observers, while empty names are rejected."
+        ),
+        "requirement_ids": ["FR-001", "EH-001"],
+        "source": "specification",
+        "evidence": [
+            {
+                "requirement_id": "FR-001",
+                "excerpt": "Dedicated lifecycle events notify observers after operations.",
+            },
+            {"requirement_id": "EH-001", "excerpt": "Reject an empty name."},
+        ],
+    }]
+    architecture["contracts"].append({
+        "contract_id": "SYM-002",
+        "component_id": "CMP-001",
+        "qualified_name": "greeting.observe_lifecycle",
+        "kind": "function",
+        "declaration": "observe_lifecycle(callback: callable) -> None",
+        "visibility": "public",
+        "requirement_ids": ["FR-001"],
+    })
+
+    validate_architecture(architecture, specification)
+
+
 def test_clean_architecture_keeps_test_candidates_as_scenarios_only():
     architecture = _architecture()
     architecture["capabilities"][0]["requirement_ids"].append("TC-001")
@@ -254,6 +408,20 @@ def test_clean_architecture_normalisation_aligns_contract_declaration_name():
 
     assert result["contracts"][0]["declaration"] == "greet(name: str) -> str"
     assert architecture["contracts"][0]["declaration"] == "wrong(name: str) -> str"
+    validate_architecture(result, SPECIFICATION)
+
+
+def test_clean_architecture_normalisation_aligns_stub_declaration_name():
+    architecture = _architecture()
+    architecture["contracts"][0]["declaration"] = (
+        "def wrong(name: str) -> str: ..."
+    )
+
+    result = normalise_architecture(architecture)
+
+    assert result["contracts"][0]["declaration"] == (
+        "def greet(name: str) -> str: ..."
+    )
     validate_architecture(result, SPECIFICATION)
 
 

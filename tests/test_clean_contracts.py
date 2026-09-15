@@ -1,3 +1,5 @@
+import pytest
+
 from packages.modules.clean.validation import validate_project
 from packages.modules.clean.workspace import CleanWorkspace
 
@@ -42,6 +44,36 @@ def test_python_contracts_accept_exact_function_signature(tmp_path):
     )
 
     assert check["status"] == "pass"
+
+
+@pytest.mark.parametrize(
+    "signature,content",
+    [
+        (
+            "def run(value: str) -> str: ...",
+            "def run(value: str) -> str:\n    return value\n",
+        ),
+        (
+            "async def run(value: str) -> str: ...",
+            "async def run(value: str) -> str:\n    return value\n",
+        ),
+    ],
+)
+def test_python_contracts_accept_stub_style_callable_declarations(
+    tmp_path, signature, content
+):
+    assert _check(tmp_path, content, _plan(signature))["status"] == "pass"
+
+
+def test_python_contracts_preserve_async_callable_kind(tmp_path):
+    check = _check(
+        tmp_path,
+        "def run(value: str) -> str:\n    return value\n",
+        _plan("async def run(value: str) -> str: ..."),
+    )
+
+    assert check["status"] == "fail"
+    assert "must be asynchronous" in check["message"]
 
 
 def test_python_contracts_accept_method_nested_under_declared_class(tmp_path):

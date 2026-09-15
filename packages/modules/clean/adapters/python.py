@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import re
 from copy import deepcopy
 from pathlib import PurePosixPath
@@ -18,11 +19,83 @@ from packages.modules.clean.validation import validate_project
 from packages.modules.clean.workspace import CleanWorkspace
 
 
+def _postpone_unsafe_callable_unions(content: str) -> str:
+    """Prevent runtime evaluation of contract-preserving ``callable | T`` annotations."""
+    try:
+        tree = ast.parse(content)
+    except SyntaxError:
+        return content
+    if any(
+        isinstance(node, ast.ImportFrom)
+        and node.module == "__future__"
+        and any(alias.name == "annotations" for alias in node.names)
+        for node in tree.body
+    ):
+        return content
+
+    annotations: list[ast.expr] = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            annotations.extend(
+                argument.annotation
+                for argument in [
+                    *node.args.posonlyargs,
+                    *node.args.args,
+                    *node.args.kwonlyargs,
+                ]
+                if argument.annotation is not None
+            )
+            if node.args.vararg and node.args.vararg.annotation is not None:
+                annotations.append(node.args.vararg.annotation)
+            if node.args.kwarg and node.args.kwarg.annotation is not None:
+                annotations.append(node.args.kwarg.annotation)
+            if node.returns is not None:
+                annotations.append(node.returns)
+        elif isinstance(node, ast.AnnAssign):
+            annotations.append(node.annotation)
+
+    needs_postponing = any(
+        isinstance(part, ast.BinOp)
+        and isinstance(part.op, ast.BitOr)
+        and any(
+            isinstance(member, ast.Name) and member.id == "callable"
+            for member in ast.walk(part)
+        )
+        for annotation in annotations
+        for part in ast.walk(annotation)
+    )
+    if not needs_postponing:
+        return content
+
+    lines = content.splitlines(keepends=True)
+    newline = "\r\n" if "\r\n" in content else "\n"
+    if tree.body and isinstance(tree.body[0], ast.Expr) and isinstance(
+        tree.body[0].value, ast.Constant
+    ) and isinstance(tree.body[0].value.value, str):
+        insertion = tree.body[0].end_lineno or tree.body[0].lineno
+    elif tree.body:
+        insertion = tree.body[0].lineno - 1
+    else:
+        insertion = len(lines)
+    lines.insert(insertion, f"from __future__ import annotations{newline}")
+    return "".join(lines)
+
+
 class PythonRuntimeAdapter:
     """Static Python policy used by the project-first reconstruction pipeline."""
 
     adapter_id = "python-static"
     policy_version = 1
+    supports_behavior_probes = True
+
+    def configure_execution(self, *, timeout_seconds: float, agent_options: dict[str, Any]) -> tuple[Any, Any]:
+        from packages.agents.clean_team import CleanBehaviorProbeAgent
+        from packages.modules.clean.behavior import LocalPythonBehaviorProbeExecutor
+        from packages.modules.clean.adapters.python_readiness import LocalPythonReadinessExecutor
+
+        self.readiness_executor = LocalPythonReadinessExecutor(timeout_seconds=timeout_seconds)
+        return (CleanBehaviorProbeAgent(**agent_options),
+                LocalPythonBehaviorProbeExecutor(timeout_seconds=timeout_seconds))
     _base_validators = frozenset(
         {
             "manifest-integrity",
@@ -158,7 +231,33 @@ class PythonRuntimeAdapter:
         renames.update(_package_surface_renames(normalised, layout=layout))
         if renames:
             _apply_manifest_path_renames(normalised, renames)
-        return normalised
+        # Recover only omitted claims on an already planned, uniquely matching
+        # module. Never create files, change ownership, or guess from a filename.
+        provided = {cid for task in normalised['files'] for cid in task['provides']}
+        recovered_claim = False
+        for contract in architecture['contracts']:
+            cid = contract['contract_id']
+            if cid in provided or not contracts[cid]:
+                continue
+            module_path = contracts[cid].replace('.', '/')
+            prefix = 'src/' if layout == 'src' else ''
+            paths = {f'{prefix}{module_path}.py', f'{prefix}{module_path}/__init__.py'}
+            candidates = [task for task in normalised['files']
+                          if task['category'] == 'source'
+                          and task['component_id'] == contract['component_id']
+                          and task['path'] in paths]
+            if len(candidates) != 1:
+                continue
+            task = candidates[0]
+            task['provides'].append(cid)
+            recovered_claim = True
+            task['requires'] = [item for item in task['requires'] if item != cid]
+            task['requirement_ids'] = list(dict.fromkeys([
+                *task['requirement_ids'], *contract['requirement_ids'],
+            ]))
+        # The existing canonical module/path normalization can now see the newly
+        # assigned providers. A second pass cannot re-add these claims.
+        return self.normalise_manifest(architecture, normalised) if recovered_claim else normalised
 
     def normalise_generated_content(
         self,
@@ -188,13 +287,14 @@ class PythonRuntimeAdapter:
                 return match.group(0)
             return f"{match.group('prefix')}{module}{match.group('suffix')}"
 
-        return re.sub(
+        normalised = re.sub(
             r"^(?P<prefix>[ \t]*from[ \t]+)src\.(?P<module>[A-Za-z_]"
             r"[A-Za-z0-9_.]*)(?P<suffix>[ \t]+import\b)",
             replace,
             content,
             flags=re.MULTILINE,
         )
+        return _postpone_unsafe_callable_unions(normalised)
 
     def validate_manifest(
         self,

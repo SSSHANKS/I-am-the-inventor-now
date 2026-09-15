@@ -112,6 +112,11 @@ class CleanComponentSchema(StrictSchema):
     )
 
 
+class CleanBehaviorEvidenceSchema(StrictSchema):
+    requirement_id = fields.String(required=True, validate=validate.Regexp(_REQUIREMENT_ID))
+    excerpt = fields.String(required=True, validate=validate.Length(min=1, max=4000))
+
+
 class CleanBehaviorRuleSchema(StrictSchema):
     aspect = fields.String(required=True, validate=validate.OneOf(
         ["arguments", "results", "errors", "input-format", "state", "lifetime"]
@@ -125,6 +130,8 @@ class CleanBehaviorRuleSchema(StrictSchema):
         ["specification", "clean-proposal"]
     ))
     proposal_id = fields.String(validate=validate.Regexp(r"^PROP-\d{3,}$"))
+    evidence = fields.List(fields.Nested(CleanBehaviorEvidenceSchema),
+                           validate=validate.Length(min=1, max=64))
 
 
 class CleanArchitectureContractSchema(StrictSchema):

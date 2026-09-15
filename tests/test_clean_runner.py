@@ -760,7 +760,7 @@ def test_clean_runner_reports_failure_when_repair_budget_is_zero(tmp_path):
     assert result.report_path.is_file()
 
 
-def test_clean_runner_retries_changed_content_with_same_failure(tmp_path):
+def test_clean_runner_rejects_changed_content_with_same_failure_then_retries(tmp_path):
     handoff = export_clean_handoff(
         tmp_path / "handoff", SPECIFICATION, {"status": "pass"}
     )
@@ -834,19 +834,130 @@ def test_clean_runner_retries_changed_content_with_same_failure(tmp_path):
             encoding="utf-8"
         )
     )
-    assert record["outcome"] == "changed"
+    assert record["outcome"] == "rejected"
     assert record["stop_reason"] is None
-    assert record["failure_fingerprint_repeated"] is True
-    assert record["changed_paths"] == ["greeting.py"]
+    assert record["changed_paths"] == []
+    assert record["candidate_changed_paths"] == ["greeting.py"]
+    assert any("does not resolve any" in item for item in record["regressions"])
     assert (
         record["before_failure_fingerprint"]
         == record["after_failure_fingerprint"]
     )
     assert (
         record["before_content_hashes"]["greeting.py"]
-        != record["after_content_hashes"]["greeting.py"]
+        == record["after_content_hashes"]["greeting.py"]
     )
     assert "<repair_attempt>\n2\n</repair_attempt>" in repair_client.prompts[1]
+    assert "repair-candidate-rejected" in repair_client.prompts[1]
+    assert "candidate was not published" in repair_client.prompts[1]
+
+
+def test_clean_runner_rejects_out_of_scope_repair_then_retries(tmp_path):
+    handoff = export_clean_handoff(
+        tmp_path / "handoff", SPECIFICATION, {"status": "pass"}
+    )
+    builder = _agent(
+        CleanBuilderAgent,
+        json.dumps({
+            "files": [{
+                "path": "greeting.py",
+                "content": "def greeting() -> bytes:\n    return b'wrong'\n",
+                "requirement_ids": ["FR-001"],
+            }],
+            "notes": [],
+        }),
+    )
+    repair_client = StubTextClient([
+        json.dumps({
+            "replacements": [{"path": "unrelated.py", "content": "value = 1\n"}],
+            "rationale": "Changed an unrelated path.",
+        }),
+        json.dumps({
+            "replacements": [{
+                "path": "greeting.py",
+                "content": "def greeting() -> str:\n    return 'hello'\n",
+            }],
+            "rationale": "Repair the allowed provider.",
+        }),
+    ])
+    runner = CleanRunner(
+        _agent(CleanPlannerAgent, json.dumps(_plan())),
+        builder,
+        CleanRepairAgent(model="stub/model", chat_client=repair_client),
+        max_repairs=2,
+    )
+
+    result = runner.run(handoff, tmp_path / "output")
+
+    assert not any(check["status"] == "fail" for check in result.report["checks"])
+    assert not (result.project_root / "unrelated.py").exists()
+    record = json.loads(
+        (result.output_root / "_clean/iterations/repair-1.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert record["outcome"] == "rejected"
+    assert record["candidate_changed_paths"] == ["unrelated.py"]
+    assert "outside its failure task" in record["regressions"][0]
+    assert "candidate was not published" in repair_client.prompts[1]
+
+
+def test_clean_runner_preserves_validation_state_after_transient_model_failure(tmp_path):
+    from packages.agents.base_agent import ModelCallError
+
+    handoff = export_clean_handoff(
+        tmp_path / "handoff", SPECIFICATION, {"status": "pass"}
+    )
+    builder = _agent(
+        CleanBuilderAgent,
+        json.dumps({
+            "files": [{
+                "path": "greeting.py",
+                "content": "def greeting() -> bytes:\n    return b'wrong'\n",
+                "requirement_ids": ["FR-001"],
+            }],
+            "notes": [],
+        }),
+    )
+
+    class Repairer:
+        source_reader = alias_map = artifact_verifier = None
+
+        def __init__(self):
+            self.calls = 0
+
+        def repair_files(self, *args, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                raise ModelCallError("temporary timeout", kind="server", status_code=503)
+            return {
+                "replacements": [{
+                    "path": "greeting.py",
+                    "content": "def greeting() -> str:\n    return 'hello'\n",
+                }],
+                "rationale": "Repair the contract after the transient failure.",
+            }
+
+    repairer = Repairer()
+    runner = CleanRunner(
+        _agent(CleanPlannerAgent, json.dumps(_plan())),
+        builder,
+        repairer,
+        max_repairs=2,
+    )
+
+    result = runner.run(handoff, tmp_path / "output")
+
+    assert not any(check["status"] == "fail" for check in result.report["checks"])
+    assert repairer.calls == 2
+    record = json.loads(
+        (result.output_root / "_clean/iterations/repair-1.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert record["outcome"] == "model-call-failed"
+    assert record["error_kind"] == "server"
+    assert record["before_failure_fingerprint"] == record["after_failure_fingerprint"]
 
 
 def test_clean_repair_receives_read_only_dependent_context(tmp_path):
@@ -1465,3 +1576,5 @@ def test_project_first_behavior_failure_repairs_production_with_frozen_probe(tmp
         if item["name"] == "python-behavior-probes"
     )
     assert behavior["status"] == "pass"
+    assert "<failing_behavior_probes_read_only>" in repair_client.prompts[1]
+    assert "assert greeting() == 'hello'" in repair_client.prompts[1]

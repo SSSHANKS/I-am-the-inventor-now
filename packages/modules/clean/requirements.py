@@ -163,7 +163,12 @@ def _line_contexts(lines: list[str]) -> list[_LineContext]:
             title = match.group("title").strip()
             headings = [heading for heading in headings if heading[0] < level]
             inherited = headings[-1][2] if headings else None
-            headings.append((level, title, _category_for_heading(title) or inherited))
+            category = (
+                None
+                if _is_non_requirement_heading(title)
+                else _category_for_heading(title) or inherited
+            )
+            headings.append((level, title, category))
         category = headings[-1][2] if headings else None
         section = " / ".join(heading[1] for heading in headings)
         contexts.append(_LineContext(category=category, section=section))
@@ -187,6 +192,24 @@ def _category_for_heading(title: str) -> str | None:
     ):
         return "TC"
     return None
+
+
+def _is_non_requirement_heading(title: str) -> bool:
+    """Keep supporting catalogues and unresolved gaps out of the requirement IR.
+
+    These headings often contain category phrases such as ``Error Handling`` while
+    describing evidence *about* that category.  They also occur beneath requirement
+    headings, so they must explicitly reset rather than inherit the parent category.
+    """
+    normalized = re.sub(r"[^a-z]+", " ", title.casefold()).strip()
+    return (
+        "evidence reference" in normalized
+        or "evidence catalogue" in normalized
+        or "evidence catalog" in normalized
+        or normalized.startswith("gap ")
+        or "open question" in normalized
+        or normalized in {"gaps", "gaps and open questions"}
+    )
 
 
 def _is_precondition_postcondition_elaboration(section: str) -> bool:

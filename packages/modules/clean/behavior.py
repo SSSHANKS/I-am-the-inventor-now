@@ -173,13 +173,20 @@ def validate_behavior_probe_suite(
                 f"Behavior probes do not cover {capability_id} requirements: "
                 + ", ".join(sorted(missing_requirements))
             )
-        covered_scenarios = {item for probe in assigned for item in probe["scenario_ids"]}
-        missing_scenarios = set(capability["scenario_ids"]) - covered_scenarios
-        if missing_scenarios:
-            raise BehaviorProbeError(
-                f"Behavior probes do not use {capability_id} scenarios: "
-                + ", ".join(sorted(missing_scenarios))
-            )
+    required_scenarios = {
+        scenario_id
+        for capability in capabilities.values()
+        for scenario_id in capability["scenario_ids"]
+    }
+    covered_scenarios = {
+        scenario_id for probe in probes for scenario_id in probe["scenario_ids"]
+    }
+    missing_scenarios = required_scenarios - covered_scenarios
+    if missing_scenarios:
+        raise BehaviorProbeError(
+            "Behavior probes do not use required scenarios: "
+            + ", ".join(sorted(missing_scenarios))
+        )
     return suite
 
 
@@ -196,6 +203,10 @@ def _validate_probe_code(
         tree = ast.parse(code, filename=f"{probe_id}.py")
     except SyntaxError as exc:
         raise BehaviorProbeError(f"Probe {probe_id} is not valid Python") from exc
+    try:
+        compile(tree, filename=f"{probe_id}.py", mode="exec")
+    except SyntaxError as exc:
+        raise BehaviorProbeError(f"Probe {probe_id} is not executable Python: {exc.msg}") from exc
     assertions = _executed_assertions(tree)
     if not assertions:
         raise BehaviorProbeError(
@@ -320,6 +331,10 @@ def _weak_assertion(expression: ast.expr) -> bool:
         return _call_name(expression.func) in {"callable", "hasattr", "isinstance", "issubclass"}
     if isinstance(expression, ast.Compare) and len(expression.ops) == 1:
         comparator = expression.comparators[0]
+        if _nonnegative_measure_tautology(
+            expression.left, expression.ops[0], comparator
+        ):
+            return True
         if isinstance(expression.ops[0], (ast.Is, ast.IsNot)) and isinstance(
             comparator, ast.Constant
         ) and comparator.value is None:
@@ -327,6 +342,32 @@ def _weak_assertion(expression: ast.expr) -> bool:
         if isinstance(expression.left, ast.Call) and _call_name(expression.left.func) == "type":
             return True
     return False
+
+
+def _nonnegative_measure_tautology(
+    left: ast.expr, operator: ast.cmpop, right: ast.expr
+) -> bool:
+    """Detect assertions such as ``len(events) >= 0`` that cannot fail."""
+    def is_len(node: ast.expr) -> bool:
+        return (
+            isinstance(node, ast.Call)
+            and _call_name(node.func) == "len"
+            and len(node.args) == 1
+            and not node.keywords
+        )
+
+    def is_zero(node: ast.expr) -> bool:
+        return isinstance(node, ast.Constant) and node.value == 0
+
+    return (
+        is_len(left)
+        and is_zero(right)
+        and isinstance(operator, (ast.GtE, ast.NotEq))
+    ) or (
+        is_zero(left)
+        and is_len(right)
+        and isinstance(operator, (ast.LtE, ast.NotEq))
+    )
 
 
 def _constant_truth(expression: ast.expr) -> bool | None:

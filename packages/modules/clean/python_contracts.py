@@ -65,7 +65,7 @@ def python_contract_declaration_error(contract: dict[str, Any]) -> str | None:
                 return "class constructor signatures must return None"
             return None
         declaration = _parse_callable_signature(signature)
-        if declaration is None:
+        if declaration is None or isinstance(declaration, ast.AsyncFunctionDef):
             return f"invalid class signature {signature!r}"
         if declaration.name != name:
             return (
@@ -222,6 +222,15 @@ def _signature_mismatch(binding: ast.AST, contract: dict[str, Any]) -> str | Non
         declaration = _parse_callable_signature(expected)
         assert declaration is not None
         assert isinstance(binding, (ast.FunctionDef, ast.AsyncFunctionDef))
+        if isinstance(binding, ast.AsyncFunctionDef) != isinstance(
+            declaration, ast.AsyncFunctionDef
+        ):
+            expected_kind = (
+                "asynchronous"
+                if isinstance(declaration, ast.AsyncFunctionDef)
+                else "synchronous"
+            )
+            return f"callable must be {expected_kind} in contracted signature {expected!r}"
         if _arguments_key(binding.args) != _arguments_key(declaration.args):
             return f"arguments do not match contracted signature {expected!r}"
         if _annotation(binding.returns) != _annotation(declaration.returns):
@@ -284,7 +293,12 @@ def _actual_contract_declaration(
 ) -> str:
     name = str(contract["qualified_name"]).rsplit(".", 1)[-1]
     if isinstance(binding, (ast.FunctionDef, ast.AsyncFunctionDef)):
-        return _render_callable_declaration(name, binding.args, binding.returns)
+        return _render_callable_declaration(
+            name,
+            binding.args,
+            binding.returns,
+            asynchronous=isinstance(binding, ast.AsyncFunctionDef),
+        )
     if isinstance(binding, ast.ClassDef):
         expected_class = _parse_class_declaration_signature(contract["signature"])
         if expected_class is not None:
@@ -342,8 +356,11 @@ def _render_callable_declaration(
     name: str,
     arguments: ast.arguments,
     returns: ast.expr | None,
+    *,
+    asynchronous: bool = False,
 ) -> str:
-    declaration = ast.FunctionDef(
+    declaration_type = ast.AsyncFunctionDef if asynchronous else ast.FunctionDef
+    declaration = declaration_type(
         name=name,
         args=deepcopy(arguments),
         body=[ast.Pass()],
@@ -353,6 +370,8 @@ def _render_callable_declaration(
     )
     ast.fix_missing_locations(declaration)
     header = ast.unparse(declaration).splitlines()[0]
+    if asynchronous:
+        return header.removesuffix(":")
     return header.removeprefix("def ").removesuffix(":")
 
 
@@ -427,9 +446,21 @@ def _arguments_key(arguments: ast.arguments, *, drop_first: bool = False) -> tup
     )
 
 
-def _parse_callable_signature(signature: str) -> ast.FunctionDef | None:
+def _parse_callable_signature(
+    signature: str,
+) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+    normalized = _normalise_signature_markup(signature).strip()
+    if normalized.startswith(("def ", "async def ")):
+        try:
+            tree = ast.parse(normalized)
+        except SyntaxError:
+            return None
+        node = tree.body[0] if len(tree.body) == 1 else None
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return None
+        return node if _is_stub_body(node.body) else None
     try:
-        tree = ast.parse(f"def {_normalise_signature_markup(signature)}:\n    pass\n")
+        tree = ast.parse(f"def {normalized}:\n    pass\n")
     except SyntaxError:
         return None
     node = tree.body[0] if len(tree.body) == 1 else None

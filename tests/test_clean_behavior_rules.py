@@ -5,6 +5,7 @@ import pytest
 from marshmallow import ValidationError
 
 from packages.agents.clean_team.behavior_probe_agent import CleanBehaviorProbeAgent
+from packages.agents.clean_team.prompts import BEHAVIOR_PROBE_INSTRUCTION
 from packages.modules.clean.architecture import validate_architecture, CleanArchitectureError
 from packages.modules.clean.context import build_scoped_context
 from packages.modules.clean.manifest import architecture_sha256
@@ -38,6 +39,58 @@ def test_legacy_contracts_remain_compatible():
 def test_behavior_rules_accept_verbatim_requirement_with_whitespace_variation():
     architecture = architecture_with_rule(statement="Return a greeting\n for the supplied name.")
     assert validate(architecture)["contracts"][0]["behavior_rules"]
+
+
+def test_behavior_rule_evidence_ignores_evidence_citation_label_only():
+    specification = SPECIFICATION.replace(
+        "Return a greeting for the supplied name.",
+        "Return a greeting for the supplied name (Evidence: EV-001).",
+    )
+    architecture = architecture_with_rule(
+        statement="Return a greeting for the supplied name.",
+        evidence=[{
+            "requirement_id": "FR-001",
+            "excerpt": "Return a greeting for the supplied name (EV-001)",
+        }],
+    )
+
+    loaded = CleanArchitectureSchema().load(architecture)
+    assert validate_architecture(loaded, specification, compatibility_mode="renamed")
+
+
+def test_behavior_rule_evidence_ignores_parenthesized_evidence_citations_only():
+    specification = SPECIFICATION.replace(
+        "Return a greeting for the supplied name.",
+        "Return a greeting (EV-001, EV-002) for the supplied name.",
+    )
+    architecture = architecture_with_rule(
+        statement="Return a greeting for the supplied name.",
+        evidence=[{
+            "requirement_id": "FR-001",
+            "excerpt": "Return a greeting for the supplied name.",
+        }],
+    )
+
+    loaded = CleanArchitectureSchema().load(architecture)
+    assert validate_architecture(loaded, specification, compatibility_mode="renamed")
+
+
+def test_behavior_rule_evidence_does_not_ignore_behavioral_parentheses():
+    specification = SPECIFICATION.replace(
+        "Return a greeting for the supplied name.",
+        "Return a greeting (in uppercase) for the supplied name.",
+    )
+    architecture = architecture_with_rule(
+        statement="Return a greeting for the supplied name.",
+        evidence=[{
+            "requirement_id": "FR-001",
+            "excerpt": "Return a greeting for the supplied name.",
+        }],
+    )
+
+    loaded = CleanArchitectureSchema().load(architecture)
+    with pytest.raises(CleanArchitectureError, match="verbatim excerpt"):
+        validate_architecture(loaded, specification, compatibility_mode="renamed")
 
 
 @pytest.mark.parametrize("changes, message", [
@@ -109,8 +162,59 @@ def test_rules_survive_plan_schema_and_generation_repair_context_and_reach_probe
     assert expected[0]["statement"] == "Return a greeting for the supplied name."
 
 
+def test_behavior_probe_instruction_isolates_phases_and_exercises_exports():
+    instruction = " ".join(BEHAVIOR_PROBE_INSTRUCTION.split())
+    assert "Use a fresh public object" in instruction
+    assert "every earlier registration remains part of the setup" in instruction
+    assert "import the symbol through the declared public package root" in instruction
+
+
 def test_behavior_rule_change_invalidates_architecture_hash():
     architecture = architecture_with_rule()
     changed = deepcopy(architecture)
     changed["contracts"][0]["behavior_rules"][0]["aspect"] = "arguments"
     assert architecture_sha256(architecture) != architecture_sha256(changed)
+
+
+def combined_architecture():
+    return architecture_with_rule(
+        statement="Greet a supplied name, rejecting empty names.",
+        requirement_ids=["FR-001", "EH-001"],
+        evidence=[
+            {"requirement_id": "FR-001", "excerpt": "Return a greeting for the supplied name."},
+            {"requirement_id": "EH-001", "excerpt": "Reject an empty name."},
+        ],
+    )
+
+
+def test_synthesis_accepts_distinct_evidence_per_requirement():
+    architecture = validate(combined_architecture())
+    rules = architecture['contracts'][0]['behavior_rules']
+    plan = _compatibility_plan(architecture, _manifest(architecture))
+    assert plan['symbol_contracts'][0]['behavior_rules'] == rules
+    assert len(rules[0]['evidence']) == 2
+
+
+@pytest.mark.parametrize('change, message', [
+    ('missing', 'exactly once'), ('duplicate', 'exactly once'), ('foreign', 'exactly once'),
+    ('wrong-quote', 'verbatim excerpt'), ('swapped', 'verbatim excerpt'),
+])
+def test_per_requirement_evidence_cannot_be_missing_or_misattributed(change, message):
+    architecture = combined_architecture()
+    evidence = architecture['contracts'][0]['behavior_rules'][0]['evidence']
+    if change == 'missing': evidence.pop()
+    elif change == 'duplicate': evidence.append(deepcopy(evidence[0]))
+    elif change == 'foreign': evidence[0]['requirement_id'] = 'FR-999'
+    elif change == 'wrong-quote': evidence[0]['excerpt'] = 'Return JSON.'
+    else: evidence[0]['excerpt'], evidence[1]['excerpt'] = evidence[1]['excerpt'], evidence[0]['excerpt']
+    with pytest.raises(CleanArchitectureError, match=message):
+        validate(architecture)
+
+
+def test_proposal_cannot_disguise_itself_as_quoted_evidence():
+    architecture = proposal_architecture()
+    architecture['contracts'][0]['behavior_rules'][0]['evidence'] = [
+        {'requirement_id': 'FR-001', 'excerpt': 'Return a greeting for the supplied name.'}
+    ]
+    with pytest.raises(CleanArchitectureError, match='cannot label a proposal'):
+        validate(architecture)

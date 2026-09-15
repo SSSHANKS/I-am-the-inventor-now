@@ -152,6 +152,45 @@ def test_python_adapter_preserves_src_prefix_outside_src_layout():
     assert result == content
 
 
+def test_python_adapter_postpones_runtime_unsafe_callable_union_annotations():
+    architecture = {
+        "project_profile": {"language": "Python", "layout": "src"},
+        "contracts": [{"qualified_name": "sample.Emitter"}],
+    }
+    content = (
+        '"""Generated emitter."""\n'
+        "class Emitter:\n"
+        "    def disconnect(self, handler: callable | None = None) -> None:\n"
+        "        pass\n"
+    )
+
+    result = PythonRuntimeAdapter().normalise_generated_content(
+        "src/sample.py", content, architecture, {"files": []}
+    )
+
+    assert result.startswith(
+        '"""Generated emitter."""\nfrom __future__ import annotations\n'
+    )
+    compile(result, "sample.py", "exec")
+    namespace = {}
+    exec(result, namespace)
+    assert "Emitter" in namespace
+
+
+def test_python_adapter_does_not_change_safe_annotations():
+    architecture = {
+        "project_profile": {"language": "Python", "layout": "src"},
+        "contracts": [{"qualified_name": "sample.run"}],
+    }
+    content = "def run(value: str | None = None) -> None:\n    pass\n"
+
+    result = PythonRuntimeAdapter().normalise_generated_content(
+        "src/sample.py", content, architecture, {"files": []}
+    )
+
+    assert result == content
+
+
 def test_adapter_rejects_adapter_owned_files_without_scaffold_support():
     adapter = PythonRuntimeAdapter()
 
