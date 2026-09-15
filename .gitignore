@@ -20,6 +20,7 @@ artifacts/
 Artifacts/
 logs/
 temp/
+clean_workspaces/
 
 # Tooling caches
 .pytest_cache/

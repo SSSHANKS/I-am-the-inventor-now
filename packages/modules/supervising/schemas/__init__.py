@@ -13,6 +13,13 @@ from packages.modules.supervising.schemas.border import (
     BorderFindingSchema,
     BorderVerdictSchema,
 )
+from packages.modules.supervising.schemas.clean import (
+    CleanBuildReportSchema,
+    CleanFileBatchSchema,
+    CleanHandoffSchema,
+    CleanPlanSchema,
+    CleanRepairSchema,
+)
 from packages.modules.supervising.schemas.code_facts_analyzer import (
     CODE_FACTS_OUTPUT_FIELDS,
     CodeFactsAnalyzerSchema,
@@ -54,6 +61,11 @@ __all__ = [
     "BorderAdjudicationSchema",
     "BorderFindingSchema",
     "BorderVerdictSchema",
+    "CleanBuildReportSchema",
+    "CleanFileBatchSchema",
+    "CleanHandoffSchema",
+    "CleanPlanSchema",
+    "CleanRepairSchema",
     "CodeFactsAnalyzerSchema",
     "CodeFactsNarrowCallsSchema",
     "CodeFactsNarrowErrorsSchema",

@@ -589,6 +589,16 @@ def test_a_clean_label_survives_untouched():
     assert art["border_review"] == []
 
 
+def test_verbatim_source_prose_label_falls_back_before_reaching_planner():
+    """Regression for the phrase that crossed in Click's specification plan."""
+    lifted = "Git-/Mercurial-like command line interface"
+    _, art = _catalogue({"title": lifted}, kind="sections")
+
+    assert art["entries"][0]["about"] == "a documentation section"
+    assert lifted not in json.dumps(art)
+    assert "verbatim source-document prose" in art["border_review"][0]
+
+
 def test_production_code_is_catalogued_before_examples():
     from packages.modules.boundary import build_evidence_catalogue, mint_evidence_ids
 

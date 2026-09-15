@@ -5,8 +5,8 @@
 Clones the repository, indexes it, plans and runs four analysis stages, writes a
 behavioural specification, then Border judges whether anything original leaked.
 A failed Border verdict triggers Dirty repairs (rewrite the leaking passages) and
-re-gates until it passes or ``--border-max-repairs`` is exhausted. Only then does the
-pipeline exit non-zero so Clean never receives a contaminated spec.
+re-gates until it passes or ``--border-max-repairs`` is exhausted. A pass exports a
+minimal verified handoff for the separate Clean process; a failure exports nothing.
 
 The specification is a CROSSING artifact: it describes what the project does, never how
 the original expressed it (CLAUDE.md section 2). Use `--stub` to exercise the whole
@@ -48,6 +48,7 @@ from packages.modules.boundary import (
     neutral_manifest,
     register_code_identifiers,
 )
+from packages.modules.handoff import HandoffError, export_clean_handoff
 from packages.modules.indexing import SourceCodeIndexer, SourceDocIndexer
 from packages.modules.ingesting import provide_source_ingestor
 from packages.modules.skills.reading import Reader
@@ -101,6 +102,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=(
             "how many times Dirty may rewrite the specification after Border refuses "
             f"(default: {DEFAULT_MAX_REPAIRS}; 0 means gate once with no repair)"
+        ),
+    )
+    parser.add_argument(
+        "--compatibility-mode",
+        choices=("drop-in", "renamed"),
+        default="renamed",
+        help=(
+            "public API policy recorded in the Clean handoff: drop-in preserves approved "
+            "documented names; renamed creates a behavior-equivalent API (default: renamed)"
         ),
     )
     return parser.parse_args(argv)
@@ -163,9 +173,11 @@ def run(args: argparse.Namespace) -> Path:
     # --- agents ---------------------------------------------------------------
     def agent_kwargs(name: str) -> dict:
         agent = settings.agent(name)
+        retry_path = agent.retry_profile_path(settings.model_profiles_dir)
         kwargs = {
             "model": agent.model,
             "profile_path": str(agent.profile_path(settings.model_profiles_dir)),
+            "retry_profile_path": str(retry_path) if retry_path else None,
             "max_validation_retries": agent.max_validation_retries,
             "alias_map": alias_map,
         }
@@ -275,6 +287,13 @@ def run(args: argparse.Namespace) -> Path:
         )
         spec_path = storage.save_text("specification.md", specification)
         log.info("stage complete: border")
+        handoff_path = export_clean_handoff(
+            spec_path.parent / "clean_handoff",
+            specification,
+            _verdict,
+            compatibility_mode=args.compatibility_mode,
+        )
+        log.info("stage complete: clean handoff -> %s", handoff_path)
 
     if not args.keep_clone:
         _discard_clone(manifest.repo_local_path)
@@ -412,6 +431,9 @@ def main(argv: list[str] | None = None) -> int:
     except ConfigError as error:
         print(f"configuration problem: {error}", file=sys.stderr)
         return 2
+    except HandoffError as error:
+        print(f"clean handoff problem: {error}", file=sys.stderr)
+        return 2
     except BorderGateError as error:
         print(f"border refused: {error}", file=sys.stderr)
         print(f"verdict: {error.verdict.finding_count} finding(s)", file=sys.stderr)
@@ -424,6 +446,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"artifacts:     {spec_path.parent}")
     if not args.skip_border:
         print(f"border:        {spec_path.parent / 'border_verdict.json'}")
+        print(f"clean handoff: {spec_path.parent / 'clean_handoff'}")
     return 0
 
 

@@ -471,7 +471,10 @@ def _neutral_about(
         if not isinstance(raw, str) or not raw.strip():
             continue
         candidate = scrub_identifiers(raw.strip()[:120], alias_map)
-        rejected_for = _label_rejection(candidate, alias_map)
+        # The raw value came directly from the original index. Even when it contains no
+        # identifier or command shape, a six-word run copied into the catalogue is still
+        # verbatim source prose and Border will reject any plan that repeats it.
+        rejected_for = _label_rejection(candidate, alias_map, source_texts=(raw,))
         if rejected_for is None:
             return candidate
         if notes is not None:
@@ -483,7 +486,11 @@ def _neutral_about(
     return noun
 
 
-def _label_rejection(text: str, alias_map: AliasMap) -> str | None:
+def _label_rejection(
+    text: str,
+    alias_map: AliasMap,
+    source_texts: Sequence[str] = (),
+) -> str | None:
     """Why a candidate description may not be put in front of a planner, or None.
 
     Two families, same as the specification scanner: originals the map knows, and the
@@ -497,7 +504,7 @@ def _label_rejection(text: str, alias_map: AliasMap) -> str | None:
     """
     if find_residual_originals(text, alias_map):
         return "a known original"
-    findings = scan_content_leaks(text)
+    findings = scan_content_leaks(text, source_texts)
     if findings:
         return " and ".join(sorted({finding.kind for finding in findings}))
     return None
@@ -728,10 +735,10 @@ def scan_content_leaks(
     originals the map already knows. These rules need no map at all: they fire on the
     shape of the thing, which is the only way to catch an original nobody registered.
 
-    Kept separate so it cannot leak into the planner's neutrality gate by accident. The
-    gate rejects a plan when scrubbing cannot fix it, and scrubbing can never fix a
-    command or a foreign phrase - a plan tripping these would fail every round instead
-    of being repaired. Advisory on the specification only (decided with the user).
+    Kept separate so callers choose the correct trust-zone corpus explicitly. The Dirty
+    planner uses it as a deterministic scrub-and-recheck gate before plans cross; Border
+    uses it to enforce the final crossing artifacts. It remains advisory when annotating
+    the specification before Border has made its decision.
 
     Reports; never decides, never suppresses. Border adjudicates (CLAUDE.md section 1).
     """

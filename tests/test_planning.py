@@ -329,6 +329,24 @@ def test_command_shaped_plan_prose_is_scrubbed_before_selection(mapped):
     assert "required runtime mode" in result
 
 
+def test_verbatim_source_prose_is_scrubbed_before_plan_selection(mapped):
+    """Regression: this exact six-word phrase caused the Click run to fail Border."""
+    lifted = "Git-/Mercurial-like command line interface"
+    plan = json.dumps(
+        _plan(summary=f"Explain the primary goals and the {lifted} design.")
+    )
+
+    result, neutral, leaks, scrubbed = enforce_neutrality(
+        plan,
+        mapped,
+        source_texts=(lifted,),
+    )
+
+    assert scrubbed and neutral and not leaks
+    assert lifted not in result
+    assert "supported behavior" in result
+
+
 def test_plan_scrubbing_preserves_keys_and_control_values(mapped):
     """Neutralisation must not corrupt the plan protocol after schema validation."""
     mapped.component_alias("source", kind="function")

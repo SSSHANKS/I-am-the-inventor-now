@@ -15,9 +15,10 @@ from typing import Any
 
 from packages.agents.base_agent import BaseAgent
 from packages.agents.dirt_team.plan_judge_agent import total_score
-from packages.agents.planning.loop import MAX_ROUNDS, run_plan_loop
+from packages.agents.planning.loop import MAX_ROUNDS, enforce_neutrality, run_plan_loop
 from packages.agents.planning.prompts import PLANNER_INSTRUCTION
 from packages.agents.planning.utils.common import log_mini_tasks
+from packages.modules.border.corpus import evidence_excerpts
 from packages.modules.ingesting import SourceManifest
 from packages.modules.supervising import PlanningPolicy
 from packages.modules.supervising.verifiers.planning import OUTPUT_FIELDS_BY_STAGE
@@ -59,6 +60,7 @@ class PlanningAgent(BaseAgent):
         log.info("Planning Agent stage -> %s", stage)
         catalogue = filter_evidence_catalogue(evidence_catalogue or [], stage)
         fields = tuple(allowed_output_fields or OUTPUT_FIELDS_BY_STAGE.get(stage, ()))
+        source_texts = _stage_source_texts(stage, code_index, doc_index)
         if not catalogue:
             log.warning(
                 "Planning Agent has an empty evidence catalogue for %s; it can only plan blind",
@@ -97,8 +99,23 @@ class PlanningAgent(BaseAgent):
             judgement["_total_score"] = total_score(judgement)
             return judgement
 
-        if judge is None or self.alias_map is None:
+        if self.alias_map is None:
             plan_text = draft([])
+            _log_plan(plan_text, stage)
+            return plan_text
+
+        if judge is None:
+            plan_text, neutral, leaks, _scrubbed = enforce_neutrality(
+                draft([]),
+                self.alias_map,
+                source_texts,
+            )
+            if not neutral:
+                log.error(
+                    "Planning Agent [%s] still carries %d leak(s) after deterministic scrub",
+                    stage,
+                    len(leaks),
+                )
             _log_plan(plan_text, stage)
             return plan_text
 
@@ -108,6 +125,7 @@ class PlanningAgent(BaseAgent):
             alias_map=self.alias_map,
             stage=stage,
             max_rounds=max_rounds,
+            source_texts=source_texts,
         )
         self.last_outcome = outcome
         if outcome.degraded:
@@ -183,6 +201,21 @@ def filter_evidence_catalogue(
         for entry in catalogue
         if entry.get("source_type") in allowed or "source_type" not in entry
     ]
+
+
+def _stage_source_texts(
+    stage: str,
+    code_index: dict[str, Any] | None,
+    doc_index: dict[str, Any] | None,
+) -> tuple[str, ...]:
+    """Dirty-only corpus used to remove copied prose before a plan can cross."""
+    allowed = _STAGE_EVIDENCE_TYPES.get(stage, frozenset())
+    sources: list[dict[str, Any] | None] = []
+    if "code" in allowed:
+        sources.append(code_index)
+    if "documentation" in allowed:
+        sources.append(doc_index)
+    return evidence_excerpts(*sources)
 
 
 def _log_plan(content: str, stage: str) -> None:

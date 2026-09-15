@@ -24,6 +24,7 @@ if the judge still has notes. Every round is real calls against a free quota.
 
 import json
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -80,7 +81,11 @@ class PlanOutcome:
         return bool(self.border_review)
 
 
-def enforce_neutrality(plan: str, alias_map: AliasMap) -> tuple[str, bool, list[str], bool]:
+def enforce_neutrality(
+    plan: str,
+    alias_map: AliasMap,
+    source_texts: Sequence[str] = (),
+) -> tuple[str, bool, list[str], bool]:
     """Gate one plan. Returns (plan, neutral, leaks, was_scrubbed).
 
     Scrub-then-recheck: a first-pass leak is not fatal, because scrubbing is deterministic
@@ -88,31 +93,43 @@ def enforce_neutrality(plan: str, alias_map: AliasMap) -> tuple[str, bool, list[
     """
     payload = _plan_payload(plan)
     scan_text = _plan_scan_text(payload) if payload is not None else plan
-    leaks = _plan_leaks(scan_text, alias_map)
+    leaks = _plan_leaks(scan_text, alias_map, source_texts)
     if not leaks:
         return plan, True, [], False
 
     log.warning("Plan leaked %d original(s); scrubbing and re-checking", len(leaks))
     scrubbed = (
-        json.dumps(_scrub_plan_value(payload, alias_map), ensure_ascii=False, indent=2)
+        json.dumps(
+            _scrub_plan_value(payload, alias_map, source_texts=source_texts),
+            ensure_ascii=False,
+            indent=2,
+        )
         if payload is not None
-        else scrub_identifiers(plan, alias_map)
+        else _scrub_plan_prose(plan, alias_map, source_texts)
     )
     scrubbed_payload = _plan_payload(scrubbed)
     scan_text = _plan_scan_text(scrubbed_payload) if scrubbed_payload is not None else scrubbed
-    remaining = _plan_leaks(scan_text, alias_map)
+    remaining = _plan_leaks(scan_text, alias_map, source_texts)
     return scrubbed, not remaining, remaining, True
 
 
-def _plan_leaks(text: str, alias_map: AliasMap) -> list[str]:
+def _plan_leaks(
+    text: str,
+    alias_map: AliasMap,
+    source_texts: Sequence[str] = (),
+) -> list[str]:
     """Return both known-name and copied-content leaks from plan prose."""
     return [
         *find_residual_originals(text, alias_map),
-        *(finding.summary for finding in scan_content_leaks(text)),
+        *(finding.summary for finding in scan_content_leaks(text, source_texts)),
     ]
 
 
-def _scrub_plan_prose(text: str, alias_map: AliasMap) -> str:
+def _scrub_plan_prose(
+    text: str,
+    alias_map: AliasMap,
+    source_texts: Sequence[str] = (),
+) -> str:
     """Replace content-shaped plan leaks with neutral behavioral phrases."""
     scrubbed = scrub_identifiers(text, alias_map)
     replacements = {
@@ -120,7 +137,7 @@ def _scrub_plan_prose(text: str, alias_map: AliasMap) -> str:
         "source-language text": "the described behavior",
         "verbatim source-document prose": "the supported behavior",
     }
-    findings = scan_content_leaks(scrubbed)
+    findings = scan_content_leaks(scrubbed, source_texts)
     for finding in sorted(findings, key=lambda item: len(item.original), reverse=True):
         scrubbed = scrubbed.replace(
             finding.original,
@@ -138,17 +155,35 @@ def _plan_payload(plan: str) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
-def _scrub_plan_value(value: Any, alias_map: AliasMap, field: str | None = None) -> Any:
+def _scrub_plan_value(
+    value: Any,
+    alias_map: AliasMap,
+    field: str | None = None,
+    source_texts: Sequence[str] = (),
+) -> Any:
     """Scrub prose values while preserving JSON keys and protocol-controlled values."""
     if isinstance(value, dict):
         return {
-            key: _scrub_plan_value(item, alias_map, field=key)
+            key: _scrub_plan_value(
+                item,
+                alias_map,
+                field=key,
+                source_texts=source_texts,
+            )
             for key, item in value.items()
         }
     if isinstance(value, list):
-        return [_scrub_plan_value(item, alias_map, field=field) for item in value]
+        return [
+            _scrub_plan_value(
+                item,
+                alias_map,
+                field=field,
+                source_texts=source_texts,
+            )
+            for item in value
+        ]
     if isinstance(value, str) and field not in _PLAN_CONTROL_FIELDS:
-        return _scrub_plan_prose(value, alias_map)
+        return _scrub_plan_prose(value, alias_map, source_texts)
     return value
 
 
@@ -187,6 +222,7 @@ def run_plan_loop(
     alias_map: AliasMap,
     stage: str,
     max_rounds: int = MAX_ROUNDS,
+    source_texts: Sequence[str] = (),
 ) -> PlanOutcome:
     """Drive the loop.
 
@@ -198,7 +234,11 @@ def run_plan_loop(
 
     for round_number in range(1, max_rounds + 1):
         plan = draft(feedback)
-        plan, neutral, leaks, was_scrubbed = enforce_neutrality(plan, alias_map)
+        plan, neutral, leaks, was_scrubbed = enforce_neutrality(
+            plan,
+            alias_map,
+            source_texts,
+        )
 
         attempt = PlanAttempt(
             round_number=round_number,
@@ -231,7 +271,7 @@ def run_plan_loop(
         if round_number == max_rounds:
             break
 
-        feedback = _feedback_for_next_round(attempt, alias_map)
+        feedback = _feedback_for_next_round(attempt, alias_map, source_texts)
         if not feedback:
             log.info("Judge raised nothing actionable; stopping at round %d", round_number)
             break
@@ -239,7 +279,11 @@ def run_plan_loop(
     return _settle(attempts, stage)
 
 
-def _feedback_for_next_round(attempt: PlanAttempt, alias_map: AliasMap) -> list[str]:
+def _feedback_for_next_round(
+    attempt: PlanAttempt,
+    alias_map: AliasMap,
+    source_texts: Sequence[str] = (),
+) -> list[str]:
     """Turn a judgement into planner-safe instructions.
 
     Everything here crosses back into a prompt that produces a neutral artifact, so every
@@ -262,7 +306,7 @@ def _feedback_for_next_round(attempt: PlanAttempt, alias_map: AliasMap) -> list[
         if isinstance(action, str) and action.strip():
             lines.append(action.strip())
 
-    return [_scrub_plan_prose(line, alias_map) for line in lines]
+    return [_scrub_plan_prose(line, alias_map, source_texts) for line in lines]
 
 
 def _settle(attempts: list[PlanAttempt], stage: str) -> PlanOutcome:

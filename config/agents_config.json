@@ -62,6 +62,27 @@
       "retry_profile": "strict_json_retry",
       "max_validation_retries": 6,
       "_why": "Adjudicates soft Border findings (DESCRIPTIVE/UNCERTAIN). Hard leaks never reach the model. Prefer a careful dismiss-or-fail judgement over throughput."
+    },
+    "clean_planner": {
+      "model": "gemini/gemini-3.5-flash-lite",
+      "profile": "strict_json",
+      "retry_profile": "strict_json_retry",
+      "max_validation_retries": 6,
+      "_why": "Plans a reconstruction using only the approved Clean handoff."
+    },
+    "clean_builder": {
+      "model": "gemini/gemini-3.5-flash-lite",
+      "profile": "strict_json",
+      "retry_profile": "strict_json_retry",
+      "max_validation_retries": 6,
+      "_why": "Generates one bounded file task at a time from the approved specification."
+    },
+    "clean_repair": {
+      "model": "gemini/gemini-3.5-flash-lite",
+      "profile": "strict_json",
+      "retry_profile": "strict_json_retry",
+      "max_validation_retries": 6,
+      "_why": "Replaces only failed Clean-generated files after deterministic checks."
     }
   }
 }
