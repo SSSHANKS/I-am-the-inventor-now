@@ -291,35 +291,74 @@ def _dependency_check(
         for value in declared_values
         if isinstance(value, str) and (match := _DEPENDENCY_NAME.match(value))
     }
+    decisions = architecture["dependency_decisions"]
+    scopes = {item["name"]: _dependency_scope(item, architecture) for item in decisions}
     expected = {
         _canonical_dependency(item["name"])
         for item in architecture["dependency_decisions"]
-        if item["required"]
+        if item["required"] and scopes[item["name"]] in {"runtime", "both"}
     }
     allowed = {
         _canonical_dependency(item["name"])
         for item in architecture["dependency_decisions"]
+        if scopes[item["name"]] in {"runtime", "both"}
     }
+    build = pyproject.get("build-system", {})
+    build_values = build.get("requires", []) if isinstance(build, dict) else []
+    if not isinstance(build_values, list):
+        return _failed_check(
+            "python-dependencies", "[build-system].requires must be an array", [path],
+            expected="build dependency array", actual=type(build_values).__name__,
+        )
+    build_declared = {
+        _canonical_dependency(match.group(1))
+        for value in build_values
+        if isinstance(value, str) and (match := _DEPENDENCY_NAME.match(value))
+    }
+    build_expected = {
+        _canonical_dependency(item["name"]) for item in decisions
+        if item["required"] and scopes[item["name"]] in {"build", "both"}
+    }
+    missing_build = sorted(build_expected - build_declared)
     missing = sorted(expected - declared)
     invented = sorted(declared - allowed)
-    if missing or invented:
+    if missing or invented or missing_build:
         parts = []
         if missing:
             parts.append("missing required dependencies: " + ", ".join(missing))
         if invented:
             parts.append("undeclared dependencies: " + ", ".join(invented))
+        if missing_build:
+            parts.append("missing required build dependencies: " + ", ".join(missing_build))
         return _failed_check(
             "python-dependencies",
             "; ".join(parts),
             [path],
-            expected=", ".join(sorted(expected)) or "no runtime dependencies",
-            actual=", ".join(sorted(declared)) or "no runtime dependencies",
+            expected=f"runtime: {sorted(expected)}; build: {sorted(build_expected)}",
+            actual=f"runtime: {sorted(declared)}; build: {sorted(build_declared)}",
             repair_hint=(
-                "Declare exactly the architecture dependency decisions; do not invent "
-                "packages or silently omit required ones."
+                "Put runtime dependencies in [project].dependencies and build dependencies "
+                "in [build-system].requires. Dependencies scoped both must be in both; "
+                "do not move runtime requirements into the build section to bypass validation."
             ),
         )
     return _passed("python-dependencies", [path])
+
+
+def _dependency_scope(item: dict[str, Any], architecture: dict[str, Any]) -> str:
+    """Honor explicit scope; conservatively accommodate older architecture files."""
+    if "scope" in item:
+        return item["scope"]
+    # Legacy schemas had no scope. Infer only the selected backend itself when
+    # its purpose explicitly concerns building, and never from generated metadata.
+    name = _canonical_dependency(item["name"])
+    backend = _canonical_dependency(architecture["project_profile"]["build_system"])
+    purpose = set(re.findall(r"[a-z]+", item.get("purpose", "").casefold()))
+    if name == backend and purpose & {"build", "building", "packaging"} and not (
+        purpose & {"runtime", "running", "execution", "import", "imports"}
+    ):
+        return "build"
+    return "runtime"
 
 
 def _entry_point_check(

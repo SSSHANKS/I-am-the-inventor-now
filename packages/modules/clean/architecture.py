@@ -492,7 +492,43 @@ def validate_architecture(
             set(components),
             f"proposal {proposal['proposal_id']} components",
         )
+    _validate_behavior_rules(architecture, statements)
     return architecture
+
+
+def _validate_behavior_rules(architecture: dict[str, Any], statements: dict[str, str]) -> None:
+    """Check provenance, not the semantic truth of a model's interpretation."""
+    proposals = {item["proposal_id"]: item for item in architecture["proposals"]}
+    normalize = lambda text: " ".join(text.split())
+    for contract in architecture["contracts"]:
+        for rule in contract.get("behavior_rules", []):
+            label = f"Contract {contract['contract_id']} {rule['aspect']} behavior rule"
+            ids = set(rule["requirement_ids"])
+            if not ids or not ids.issubset(contract["requirement_ids"]):
+                raise CleanArchitectureError(f"{label} references requirements outside its contract")
+            if len(ids) != len(rule["requirement_ids"]):
+                raise CleanArchitectureError(f"{label} repeats requirement references")
+            if rule["source"] == "specification":
+                if "proposal_id" in rule:
+                    raise CleanArchitectureError(f"{label} cannot label a proposal as specification evidence")
+                statement = normalize(rule["statement"])
+                if not statement or not all(
+                    statement in normalize(statements.get(requirement_id, "")) for requirement_id in ids
+                ):
+                    raise CleanArchitectureError(
+                        f"{label} must quote a verbatim excerpt from every referenced requirement; "
+                        "record unstated choices as clean proposals instead"
+                    )
+            elif rule["source"] == "clean-proposal":
+                proposal = proposals.get(rule.get("proposal_id"))
+                if not proposal or proposal["source"] != "clean-proposal":
+                    raise CleanArchitectureError(f"{label} requires an existing clean-proposal ledger entry")
+                if contract["component_id"] not in proposal["affected_component_ids"]:
+                    raise CleanArchitectureError(f"{label} proposal does not cover its component")
+                if normalize(rule["statement"]) != normalize(proposal["chosen_value"]):
+                    raise CleanArchitectureError(f"{label} must match the proposal's chosen_value")
+            else:
+                raise CleanArchitectureError(f"{label} has unknown provenance")
 
 
 def _unique_by_id(

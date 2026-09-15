@@ -5,6 +5,13 @@ Use only the material in the current prompt. Do not ask for, infer, or mention a
 original repository, its paths, its identifiers, Dirty artifacts, or Border findings.
 You have no tools, shell, filesystem, or conversation memory. Every path and every
 line of code must be newly proposed from the approved specification.
+Preserve dependency scopes in generated metadata and repairs. For Python, build-only
+dependencies belong in [build-system].requires, runtime dependencies in
+[project].dependencies, and dependencies scoped both belong in both sections.
+Contract behavior_rules are shared by implementation, repairs, and behavioral probes.
+Follow their argument, result, error, input-format, state, and lifetime rules together
+with the approved specification. A clean-proposal is a declared design choice, not
+evidence about the original project. Never override an explicit requirement with it.
 """.strip()
 
 COMPATIBILITY_INSTRUCTION = """
@@ -33,6 +40,9 @@ The request includes authoritative requirement inventories: every ID in
 `required_behavior_ids` must appear in both capability and component allocation, and
 every ID in `required_scenario_ids` must appear in capability scenario evidence.
 Omitting an inventory ID makes the architecture invalid.
+Give each dependency a scope: build, runtime, or both. Build backends and build-only
+tools belong in build requirements, not runtime dependencies. Use both only when
+the reconstructed application also needs that package while running.
 Treat every TC item only as scenario evidence for a capability; do not design or request
 generated tests. Components form an acyclic dependency graph. A capability may span
 multiple components, but those components together must own all of its requirements.
@@ -44,6 +54,24 @@ qualify it beneath an explicitly declared class (for example,
 `package.module.ClassName.method`) and keep it in the same component as that class.
 Label assignment declarations as `constant`, including module export declarations such
 as `__all__ = [...]`; never label an assignment as a function.
+Attach behavior_rules to each contract for the applicable observable semantics, not
+just its signature. Each rule has aspect, statement, requirement_ids, and source.
+For source=specification, statement must be a verbatim excerpt (whitespace may vary)
+from every referenced requirement, and the IDs must belong to that contract. Do not
+paraphrase, strengthen, or invent details and label them as specification evidence.
+For source=clean-proposal, include proposal_id referencing a clean-proposal ledger
+entry for the contract's component; statement must equal that entry's chosen_value.
+Keep genuinely undecidable behavior in unresolved_gaps instead of inventing a rule.
+In particular, settle these details when relevant:
+- arguments: positional and keyword forwarding, reserved context arguments, defaults;
+- results: callback return values versus callback side effects, result aggregation,
+  and whether a decorator preserves its callable;
+- errors: exact stated exception class and propagation, without retrying a callback
+  just because its body raised TypeError;
+- input-format: configuration format and how a path or descriptor is selected;
+- state and lifetime: context restoration, ownership and weak-reference collection.
+Do not choose JSON for generation and TOML for probes independently. If the format
+is unspecified and you choose one, record that choice once as a proposal and rule.
 
 The runtime policy states only capabilities available to later deterministic adapters.
 Do not claim a language, dependency, build system, layout, or executable check that the
@@ -61,9 +89,9 @@ Return only JSON with exactly this shape (all fields required):
   "project_profile": {{"kind": "library | cli | application | service | tool | mixed", "language": "Python", "runtime_version": "3.12", "build_system": "setuptools", "layout": "src", "compatibility_mode": "drop-in | renamed"}},
   "capabilities": [{{"capability_id": "CAP-001", "purpose": "...", "requirement_ids": ["FR-001"], "scenario_ids": ["TC-001"], "component_ids": ["CMP-001"]}}],
   "components": [{{"component_id": "CMP-001", "purpose": "...", "kind": "domain | interface | adapter | entrypoint | configuration", "requirement_ids": ["FR-001"], "depends_on": []}}],
-  "contracts": [{{"contract_id": "SYM-001", "component_id": "CMP-001", "qualified_name": "package.symbol", "kind": "function", "declaration": "symbol(value: str) -> str", "visibility": "public", "requirement_ids": ["FR-001"]}}],
+  "contracts": [{{"contract_id": "SYM-001", "component_id": "CMP-001", "qualified_name": "package.symbol", "kind": "function", "declaration": "symbol(value: str) -> str", "visibility": "public", "requirement_ids": ["FR-001"], "behavior_rules": [{{"aspect": "arguments | results | errors | input-format | state | lifetime", "statement": "verbatim requirement excerpt or proposal chosen_value", "requirement_ids": ["FR-001"], "source": "specification | clean-proposal"}}]}}],
   "entry_points": [{{"entry_point_id": "EP-001", "component_id": "CMP-001", "description": "...", "contract_ids": ["SYM-001"]}}],
-  "dependency_decisions": [{{"name": "dependency", "purpose": "...", "required": true, "source": "specification | adapter-baseline | clean-proposal", "requirement_ids": ["FR-001"]}}],
+  "dependency_decisions": [{{"name": "dependency", "purpose": "...", "required": true, "scope": "build | runtime | both", "source": "specification | adapter-baseline | clean-proposal", "requirement_ids": ["FR-001"]}}],
   "proposals": [{{"proposal_id": "PROP-001", "field": "project_profile.layout", "chosen_value": "src", "reason": "...", "source": "adapter-baseline | clean-proposal", "affected_component_ids": ["CMP-001"], "affects_public_compatibility": false}}],
   "unresolved_gaps": ["..."]
 }}
@@ -282,10 +310,34 @@ Use only the Python standard library and the declared project modules. Mock exte
 process launches and other boundary effects with `unittest.mock`; never access the
 network, invoke a real
 external command, inspect host configuration, or write outside a temporary directory.
+Import the reconstructed project directly: the executor configures its import path.
+Never create replacement project modules, alter Python import state (sys.path,
+sys.modules, import hooks), or load an alternative implementation. Temporary files
+are input fixtures only, not substitute library code. Mock external boundaries only,
+never the public operation whose behavior the probe claims to verify. Every probe
+must exercise the actual generated project; missing implementation is a real failure.
+Use only interfaces declared by the architecture. Never invent private callback hooks
+or assign guessed internal attributes to make lifecycle observations. If a required
+behavior has no usable public contract, expose the contract gap rather than fabricate
+an implementation detail. Respect declared return values when using decorators.
+For weak-reference APIs, keep a named callback alive throughout ordinary dispatch
+checks; inline lambdas can be collected immediately. Use weak=False explicitly when
+the scenario calls for strong ownership. Test collection separately by deliberately
+releasing the retained reference. Derive expectations from callback return values:
+list.append returns None, not the item it appended.
+Never substitute assert True, literal tautologies, or an "or True" escape for a
+behavioral assertion. Do not implement the tested behavior in a subclass override
+or replacement operation and then assert that your own code ran. Observe the actual
+generated operation through declared interfaces; mocks are for external boundaries
+and input collaborators, not for supplying missing production behavior.
 Do not read or infer any original source. Do not weaken a behavior because the proposed
 architecture looks incomplete—the probe is an independent oracle for later repair.
 
-The approved specification is the only behavioral oracle. Never invent an output
+The approved specification defines the required behavior. Validated behavior_rules
+also carry explicitly recorded Clean choices for details the specification leaves
+open; use those same choices for fixtures and expectations, without claiming they
+describe the original project. Never independently choose a conflicting format,
+argument convention, or callback-result shape. Never invent an output
 template, separator, prefix, suffix, registry entry, default value, command name, option
 name, or exception text that it does not state. An example input chosen by the probe does
 not authorize inventing an exact formatted output for that input. Use the weakest strong

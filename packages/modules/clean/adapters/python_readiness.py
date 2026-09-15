@@ -27,13 +27,14 @@ import sys
 sys.path.insert(0, sys.argv[1])
 for module_name in json.loads(sys.argv[2]):
     importlib.import_module(module_name)
-for target in json.loads(sys.argv[3]):
+for contract in json.loads(sys.argv[3]):
+    target = contract["target"]
     module_name, separator, attribute = target.partition(":")
     value = importlib.import_module(module_name)
     if separator:
         for part in attribute.split("."):
             value = getattr(value, part)
-        if not callable(value):
+        if contract["kind"] != "constant" and not callable(value):
             raise TypeError(f"entry point {target!r} is not callable")
 """.strip()
 
@@ -244,7 +245,7 @@ class LocalPythonReadinessExecutor:
                     checks.append(
                         _passed(
                             "python-entry-point-runtime",
-                            f"Resolved {len(targets)} callable entry point(s)",
+                            f"Resolved {len(targets)} entry-point contract(s)",
                         )
                         if targets
                         else _skipped(
@@ -335,18 +336,22 @@ def _public_modules(architecture: dict[str, Any]) -> list[str]:
     )
 
 
-def _entry_targets(architecture: dict[str, Any]) -> list[str]:
+def _entry_targets(architecture: dict[str, Any]) -> list[dict[str, str]]:
     contract_ids = {
         contract_id
         for entry in architecture["entry_points"]
         for contract_id in entry["contract_ids"]
     }
     return sorted(
-        {
-            python_contract_target(item, architecture["contracts"])
+        [
+            {
+                "target": python_contract_target(item, architecture["contracts"]),
+                "kind": item["kind"],
+            }
             for item in architecture["contracts"]
             if item["contract_id"] in contract_ids
-        }
+        ],
+        key=lambda item: item["target"],
     )
 
 

@@ -107,6 +107,64 @@ def _by_name(checks, name):
     return next(item for item in checks if item["name"] == name)
 
 
+@pytest.mark.parametrize("scope,runtime,build,passed", [
+    ("build", [], ["backend-kit>=1"], True),
+    ("build", ["backend-kit"], [], False),
+    ("build", [], [], False),
+    ("runtime", ["backend-kit>=1"], [], True),
+    ("runtime", [], ["backend-kit"], False),
+    ("both", ["backend-kit"], ["backend-kit"], True),
+    ("both", ["backend-kit"], [], False),
+    ("both", [], ["backend-kit"], False),
+])
+def test_dependency_scopes_require_correct_metadata_section(scope, runtime, build, passed):
+    from packages.modules.clean.adapters.python_packaging import _dependency_check
+    architecture = _architecture(dependencies=[{
+        "name": "backend-kit", "purpose": "Declared dependency", "required": True, "scope": scope,
+    }])
+    check = _dependency_check({"project": {"dependencies": runtime},
+                               "build-system": {"requires": build}}, "pyproject.toml", architecture)
+    assert (check["status"] == "pass") == passed
+
+
+def test_legacy_selected_backend_is_build_only(tmp_path):
+    architecture = _architecture(dependencies=[{
+        "name": "setuptools", "purpose": "Build and packaging specification framework.",
+        "required": True,
+    }])
+    checks = validate_python_packaging(_workspace(tmp_path, _pyproject()), architecture, _manifest())
+    assert _by_name(checks, "python-dependencies")["status"] == "pass"
+
+
+@pytest.mark.parametrize("purpose,scope", [
+    ("Build and runtime plugin loading", None),
+    ("Build and packaging framework", "runtime"),
+    ("Required framework", None),
+])
+def test_backend_name_alone_does_not_exempt_runtime_dependency(tmp_path, purpose, scope):
+    decision = {"name": "setuptools", "purpose": purpose, "required": True}
+    if scope is not None:
+        decision["scope"] = scope
+    checks = validate_python_packaging(_workspace(tmp_path, _pyproject()),
+                                      _architecture(dependencies=[decision]), _manifest())
+    check = _by_name(checks, "python-dependencies")
+    assert check["status"] == "fail"
+    assert "missing required dependencies: setuptools" in check["message"]
+
+
+def test_dependency_scope_schema_is_optional_but_validated():
+    from marshmallow import ValidationError
+    from packages.modules.supervising.schemas.clean import CleanDependencyDecisionSchema
+    decision = {"name": "tool", "purpose": "Building", "required": True,
+                "source": "adapter-baseline", "requirement_ids": []}
+    schema = CleanDependencyDecisionSchema()
+    assert "scope" not in schema.load(decision)
+    for scope in ("build", "runtime", "both"):
+        assert schema.load({**decision, "scope": scope})["scope"] == scope
+    with pytest.raises(ValidationError):
+        schema.load({**decision, "scope": "anything"})
+
+
 def test_python_packaging_accepts_coherent_src_layout_and_metadata(tmp_path):
     architecture = _architecture(
         dependencies=[

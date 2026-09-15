@@ -14,6 +14,9 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from packages.modules.clean.diagnostics import CleanDiagnostic
+from packages.modules.clean.probe_contracts import (
+    ProbeArchitectureError, ProbeContractError, validate_probe_contracts,
+)
 
 MAX_BEHAVIOR_PROBES = 64
 MAX_PROBE_CHARS = 32_000
@@ -24,8 +27,10 @@ _FORBIDDEN_IMPORT_ROOTS = frozenset(
         "ctypes",
         "ftplib",
         "http",
+        "importlib",
         "multiprocessing",
         "requests",
+        "runpy",
         "smtplib",
         "socket",
         "urllib",
@@ -78,6 +83,8 @@ class _ProcessResult:
 def validate_behavior_probe_suite(
     suite: dict[str, Any],
     architecture: dict[str, Any],
+    *,
+    require_complete: bool = True,
 ) -> dict[str, Any]:
     """Validate coverage and a conservative execution policy before any probe runs."""
     probes = suite["probes"]
@@ -143,8 +150,18 @@ def validate_behavior_probe_suite(
             allowed_import_roots,
             requires_boundary_mock=_requires_boundary_mock(capability),
         )
+        try:
+            validate_probe_contracts(probe['code'], architecture['contracts'])
+        except ProbeArchitectureError as exc:
+            raise ProbeArchitectureError(
+                f"Probe {probe['probe_id']} ({requirement_id}): {exc}"
+            ) from exc
+        except ProbeContractError as exc:
+            raise BehaviorProbeError(f"Probe {probe['probe_id']}: {exc}") from exc
         probes_by_capability.setdefault(capability_id, []).append(probe)
 
+    if not require_complete:
+        return suite
     for capability_id, capability in capabilities.items():
         assigned = probes_by_capability.get(capability_id, [])
         covered_requirements = {
@@ -183,10 +200,6 @@ def _validate_probe_code(
     if not assertions:
         raise BehaviorProbeError(
             f"Probe {probe_id} contains no module-executed assertions"
-        )
-    if all(_weak_assertion(item.test) for item in assertions):
-        raise BehaviorProbeError(
-            f"Probe {probe_id} contains only type, existence, or non-null assertions"
         )
     if requires_boundary_mock and not _uses_unittest_mock(tree):
         raise BehaviorProbeError(
@@ -239,6 +252,33 @@ def _validate_probe_code(
                 raise BehaviorProbeError(
                     f"Probe {probe_id} contains a host-absolute path"
                 )
+    # Resolve import aliases, including ``from sys import path as search``.
+    aliases = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for item in node.names:
+                aliases[item.asname or item.name.partition('.')[0]] = item.name
+        elif isinstance(node, ast.ImportFrom):
+            for item in node.names:
+                aliases[item.asname or item.name] = f"{node.module}.{item.name}"
+    protected = {f"sys.{name}" for name in (
+        "path", "modules", "meta_path", "path_hooks", "path_importer_cache",
+    )}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Name, ast.Attribute)):
+            name = _call_name(node)
+            head, dot, tail = name.partition('.')
+            resolved = aliases.get(head, head) + (dot + tail if dot else '')
+            if any(resolved == item or resolved.startswith(item + '.') for item in protected):
+                raise BehaviorProbeError(
+                    f"Probe {probe_id} accesses import state {resolved!r}; "
+                    "import the generated project directly, without replacing it"
+                )
+    if all(_weak_assertion(item.test) for item in assertions):
+        raise BehaviorProbeError(
+            f"Probe {probe_id} contains only type, existence, or non-null assertions "
+            "or always-true assertions; assert an observable result of the real project"
+        )
 
 
 def _call_name(node: ast.expr) -> str:
@@ -270,6 +310,12 @@ def _executed_assertions(tree: ast.Module) -> list[ast.Assert]:
 
 
 def _weak_assertion(expression: ast.expr) -> bool:
+    if _constant_truth(expression) is True:
+        return True
+    if isinstance(expression, ast.BoolOp):
+        weak = [_weak_assertion(value) for value in expression.values]
+        # An OR can pass via its weakest alternative; an AND requires all terms.
+        return any(weak) if isinstance(expression.op, ast.Or) else all(weak)
     if isinstance(expression, ast.Call):
         return _call_name(expression.func) in {"callable", "hasattr", "isinstance", "issubclass"}
     if isinstance(expression, ast.Compare) and len(expression.ops) == 1:
@@ -281,6 +327,43 @@ def _weak_assertion(expression: ast.expr) -> bool:
         if isinstance(expression.left, ast.Call) and _call_name(expression.left.func) == "type":
             return True
     return False
+
+
+def _constant_truth(expression: ast.expr) -> bool | None:
+    """Recognize literal tautologies without executing probe expressions."""
+    if isinstance(expression, ast.BoolOp):
+        values = [_constant_truth(value) for value in expression.values]
+        if isinstance(expression.op, ast.Or):
+            return True if True in values else (False if all(v is False for v in values) else None)
+        return False if False in values else (True if all(v is True for v in values) else None)
+    if isinstance(expression, ast.UnaryOp) and isinstance(expression.op, ast.Not):
+        value = _constant_truth(expression.operand)
+        return None if value is None else not value
+    try:
+        if isinstance(expression, ast.Compare) and len(expression.ops) == 1:
+            left = ast.literal_eval(expression.left)
+            right = ast.literal_eval(expression.comparators[0])
+            op = expression.ops[0]
+            if isinstance(op, ast.Eq):
+                return left == right
+            if isinstance(op, ast.NotEq):
+                return left != right
+            if isinstance(op, ast.In):
+                return left in right
+            if isinstance(op, ast.NotIn):
+                return left not in right
+            if isinstance(op, ast.Lt):
+                return left < right
+            if isinstance(op, ast.LtE):
+                return left <= right
+            if isinstance(op, ast.Gt):
+                return left > right
+            if isinstance(op, ast.GtE):
+                return left >= right
+            return None
+        return bool(ast.literal_eval(expression))
+    except (ValueError, TypeError, SyntaxError):
+        return None
 
 
 def _uses_unittest_mock(tree: ast.Module) -> bool:
@@ -330,12 +413,23 @@ class LocalPythonBehaviorProbeExecutor:
         manifest: dict[str, Any],
         suite: dict[str, Any],
     ) -> list[dict[str, Any]]:
-        validate_behavior_probe_suite(suite, architecture)
+        validate_behavior_probe_suite(suite, architecture, require_complete=False)
+        coverage = []
+        try:
+            validate_behavior_probe_suite(suite, architecture)
+        except BehaviorProbeError as exc:
+            coverage.append({
+                "name": "python-behavior-coverage",
+                "status": "skipped",
+                "message": str(exc),
+                "paths": [],
+            })
         root = project_root.resolve()
         if not root.is_dir():
             return [_failed_suite("Generated project directory is missing", [], [])]
 
         failures: list[CleanDiagnostic] = []
+        rejected = 0
         with tempfile.TemporaryDirectory(prefix="cb-") as temporary:
             temp_root = Path(temporary)
             for probe in suite["probes"]:
@@ -354,6 +448,15 @@ class LocalPythonBehaviorProbeExecutor:
                     probe_root=probe_root,
                 )
                 changed = _changed_paths(before, _snapshot(copied_project))
+                if result.returncode != 0 and "PROBE_INTEGRITY:" in result.output:
+                    rejected += 1
+                    coverage.append({
+                        "name": "python-behavior-coverage",
+                        "status": "skipped",
+                        "message": f"{probe['probe_id']} rejected: " + result.output.strip(),
+                        "paths": [],
+                    })
+                    continue
                 if result.returncode == 0 and not changed:
                     continue
                 paths = _capability_paths(
@@ -394,15 +497,17 @@ class LocalPythonBehaviorProbeExecutor:
 
         if not failures:
             return [
+                *coverage,
                 {
                     "name": "python-behavior-probes",
                     "status": "pass",
-                    "message": f"Passed {len(suite['probes'])} behavior probe(s)",
+                    "message": f"Passed {len(suite['probes']) - rejected} behavior probe(s)",
                     "paths": [],
                 }
             ]
         paths = sorted({path for item in failures for path in item.paths})
         return [
+            *coverage,
             {
                 "name": "python-behavior-probes",
                 "status": "fail",
@@ -425,7 +530,9 @@ class LocalPythonBehaviorProbeExecutor:
         bootstrap = (
             "import runpy,sys;"
             f"sys.path[:0]={[str(item) for item in import_roots]!r};"
-            f"runpy.run_path({str(probe_file)!r},run_name='__main__')"
+            f"runpy.run_path({str(Path(__file__).with_name('probe_runtime.py').resolve())!r},"
+            f"init_globals={{'PROBE_FILE': {str(probe_file)!r}, "
+            f"'IMPORT_ROOTS': {[str(item) for item in import_roots]!r}}})"
         )
         try:
             completed = subprocess.run(

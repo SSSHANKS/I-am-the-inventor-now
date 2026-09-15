@@ -1,6 +1,8 @@
 import sys
 import zipfile
 
+import pytest
+
 from packages.modules.clean.adapters.python_readiness import (
     LocalPythonReadinessExecutor,
     _missing_wheel_modules,
@@ -97,6 +99,26 @@ def test_python_readiness_reports_import_failure_without_pytest(tmp_path):
     assert "missing_runtime_dependency" in failure["message"]
     assert _check(checks, "python-entry-point-runtime")["status"] == "skipped"
     assert _check(checks, "executable-validation")["status"] == "fail"
+
+
+@pytest.mark.parametrize(
+    ("kind", "content", "status"),
+    [
+        ("constant", "main = []\n", "pass"),
+        ("constant", "unrelated = []\n", "fail"),
+        ("function", "main = []\n", "fail"),
+    ],
+)
+def test_python_readiness_resolves_constants_but_requires_callable_functions(
+    tmp_path, kind, content, status
+):
+    workspace = CleanWorkspace(tmp_path / "output")
+    workspace.write_generated_file("app.py", content)
+    architecture = _architecture()
+    architecture["contracts"][0]["kind"] = kind
+    checks = _executor().validate(workspace.project_root, architecture, _manifest())
+    assert _check(checks, "python-import-smoke")["status"] == status
+    assert _check(checks, "executable-validation")["status"] == status
 
 
 def test_python_readiness_rejects_import_time_project_mutation(tmp_path):

@@ -28,6 +28,7 @@ class CleanDependencySchema(StrictSchema):
     name = fields.String(required=True, validate=validate.Length(min=1))
     purpose = fields.String(required=True, validate=validate.Length(min=1))
     required = fields.Boolean(required=True)
+    scope = fields.String(validate=validate.OneOf(["build", "runtime", "both"]))
 
 
 class CleanEntryPointSchema(StrictSchema):
@@ -111,6 +112,21 @@ class CleanComponentSchema(StrictSchema):
     )
 
 
+class CleanBehaviorRuleSchema(StrictSchema):
+    aspect = fields.String(required=True, validate=validate.OneOf(
+        ["arguments", "results", "errors", "input-format", "state", "lifetime"]
+    ))
+    statement = fields.String(required=True, validate=validate.Length(min=1, max=4000))
+    requirement_ids = fields.List(
+        fields.String(validate=validate.Regexp(_REQUIREMENT_ID)),
+        required=True, validate=validate.Length(min=1),
+    )
+    source = fields.String(required=True, validate=validate.OneOf(
+        ["specification", "clean-proposal"]
+    ))
+    proposal_id = fields.String(validate=validate.Regexp(r"^PROP-\d{3,}$"))
+
+
 class CleanArchitectureContractSchema(StrictSchema):
     contract_id = fields.String(
         required=True,
@@ -128,6 +144,7 @@ class CleanArchitectureContractSchema(StrictSchema):
         ),
     )
     declaration = fields.String(required=True, validate=validate.Length(min=1))
+    behavior_rules = fields.List(fields.Nested(CleanBehaviorRuleSchema), validate=validate.Length(max=64))
     visibility = fields.String(
         required=True,
         validate=validate.OneOf(["public", "private"]),
@@ -160,6 +177,7 @@ class CleanDependencyDecisionSchema(StrictSchema):
     name = fields.String(required=True, validate=validate.Length(min=1))
     purpose = fields.String(required=True, validate=validate.Length(min=1))
     required = fields.Boolean(required=True)
+    scope = fields.String(validate=validate.OneOf(["build", "runtime", "both"]))
     source = fields.String(
         required=True,
         validate=validate.OneOf(
@@ -331,6 +349,7 @@ class CleanSymbolContractSchema(StrictSchema):
         ),
     )
     signature = fields.String(required=True, validate=validate.Length(min=1))
+    behavior_rules = fields.List(fields.Nested(CleanBehaviorRuleSchema), validate=validate.Length(max=64))
     visibility = fields.String(
         required=True,
         validate=validate.OneOf(["public", "private"]),

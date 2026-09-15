@@ -148,29 +148,12 @@ class CleanRunner:
                     compatibility_mode=handoff.compatibility_mode,
                     validation_policy=validation_policy,
                 )
-                runtime_adapter = select_runtime_adapter(
-                    architecture,
-                    readiness_executor=self.readiness_executor,
-                )
-                manifest = self._design_manifest(
-                    architecture,
-                    runtime_adapter=runtime_adapter,
+                (architecture, manifest, runtime_adapter, behavior_suite,
+                 behavior_probe_design_failure) = self._design_probe_consistent_project(
+                    prepared_specification.text, architecture,
+                    compatibility_mode=handoff.compatibility_mode,
                     validation_policy=validation_policy,
                 )
-                if self.behavior_prober is not None:
-                    try:
-                        behavior_suite = self._design_behavior_probes(
-                            prepared_specification.text,
-                            architecture,
-                            manifest,
-                        )
-                    except Exception as exc:
-                        behavior_probe_design_failure = _safe_error(exc)
-                        log.warning(
-                            "Behavior probe design unavailable; project generation "
-                            "will continue with degraded validation: %s",
-                            behavior_probe_design_failure,
-                        )
                 plan = _compatibility_plan(architecture, manifest)
                 self._validate_plan(
                     plan,
@@ -490,16 +473,60 @@ class CleanRunner:
             report=report,
         )
 
+    def _design_probe_consistent_project(
+        self, specification, architecture, *, compatibility_mode, validation_policy,
+    ):
+        """Resolve interface conflicts before files or frozen probes are generated.
+
+        Probe mistakes go back to the prober first. Persistent interface conflicts
+        are reviewed by the architect against the specification, never repaired by
+        teaching production code to imitate an undeclared test hook.
+        """
+        from packages.modules.clean.probe_contracts import ProbeArchitectureError
+
+        for attempt in range(self.max_repairs + 1):
+            adapter = select_runtime_adapter(architecture, readiness_executor=self.readiness_executor)
+            manifest = self._design_manifest(
+                architecture, runtime_adapter=adapter, validation_policy=validation_policy,
+            )
+            if self.behavior_prober is None:
+                return architecture, manifest, adapter, None, None
+            try:
+                suite = self._design_behavior_probes(specification, architecture, manifest)
+                return architecture, manifest, adapter, suite, None
+            except ProbeArchitectureError as exc:
+                if attempt < self.max_repairs:
+                    diagnostic = (
+                        f'Probe/contract conflict: {exc}. The approved specification is '
+                        'authoritative. Correct missing or contradictory contracts only '
+                        'when supported by it; do not copy invented probe interfaces.'
+                    )
+                    candidate = self.architect.revise(
+                        specification, architecture, diagnostic,
+                        compatibility_mode=compatibility_mode, runtime_policy=validation_policy,
+                    )
+                    architecture = self._design_architecture(
+                        specification, compatibility_mode=compatibility_mode,
+                        validation_policy=validation_policy, candidate=candidate,
+                    )
+                    continue
+                failure = f'Architecture/probe consistency review exhausted: {exc}'
+            except Exception as exc:
+                failure = _safe_error(exc)
+            log.warning('Behavior probe design unavailable; degraded validation: %s', failure)
+            return architecture, manifest, adapter, None, failure
+
     def _design_architecture(
         self,
         specification: str,
         *,
         compatibility_mode: str,
         validation_policy: dict[str, Any],
+        candidate: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Design, validate, and semantically repair the project architecture."""
         assert self.architect is not None
-        architecture = self.architect.design(
+        architecture = candidate if candidate is not None else self.architect.design(
             specification,
             compatibility_mode=compatibility_mode,
             runtime_policy=validation_policy,
@@ -585,7 +612,27 @@ class CleanRunner:
                     break
                 except Exception as exc:
                     if repair_number >= self.max_repairs:
-                        raise
+                        from packages.modules.clean.probe_contracts import ProbeArchitectureError
+                        if isinstance(exc, ProbeArchitectureError):
+                            raise
+                        # Retain only probes that pass every execution-policy and
+                        # ownership check; missing coverage is reported separately.
+                        candidates = CleanBehaviorProbeSuiteSchema().load(suite)
+                        accepted = []
+                        for probe in candidates["probes"]:
+                            partial = {"schema_version": 1, "probes": [*accepted, probe]}
+                            try:
+                                validate_behavior_probe_suite(
+                                    partial, scoped_architecture, require_complete=False
+                                )
+                            except ValueError as rejected:
+                                if isinstance(rejected, ProbeArchitectureError):
+                                    raise
+                                log.warning("Discarding invalid behavior probe: %s", rejected)
+                            else:
+                                accepted.append(probe)
+                        suite = {"schema_version": 1, "probes": accepted}
+                        break
                     suite = self.behavior_prober.revise(
                         specification,
                         architecture,
@@ -598,7 +645,8 @@ class CleanRunner:
         for index, probe in enumerate(combined, start=1):
             probe["probe_id"] = f"PROBE-{index:03d}"
         return validate_behavior_probe_suite(
-            {"schema_version": 1, "probes": combined}, architecture
+            {"schema_version": 1, "probes": combined}, architecture,
+            require_complete=False,
         )
 
     def _validate(
@@ -1113,6 +1161,7 @@ def _compatibility_plan(
                 "name": item["name"],
                 "purpose": item["purpose"],
                 "required": item["required"],
+                **({"scope": item["scope"]} if "scope" in item else {}),
             }
             for item in architecture["dependency_decisions"]
         ],
@@ -1130,6 +1179,7 @@ def _compatibility_plan(
                 "qualified_name": item["qualified_name"],
                 "kind": item["kind"],
                 "signature": item["declaration"],
+                **({"behavior_rules": deepcopy(item["behavior_rules"])} if "behavior_rules" in item else {}),
                 "visibility": item["visibility"],
                 "requirement_ids": list(item["requirement_ids"]),
             }
@@ -1697,7 +1747,8 @@ def _validation_level(checks: list[dict[str, Any]]) -> str:
 def _build_succeeded(checks: list[dict[str, Any]]) -> bool:
     """Require executable readiness and completed probes when probes were configured."""
     behavior_validation_complete = not any(
-        check["name"] == "python-behavior-probes" and check["status"] != "pass"
+        check["name"] in {"python-behavior-probes", "python-behavior-coverage"}
+        and check["status"] != "pass"
         for check in checks
     )
     return (
