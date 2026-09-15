@@ -485,6 +485,52 @@ def test_lifecycle_probe_must_register_observer_on_connected_public_channel():
         validate_behavior_probe_suite(_suite(code), architecture)
 
 
+def test_decorator_factory_must_be_applied_to_the_callback():
+    architecture = _architecture()
+    architecture["contracts"][0]["declaration"] = (
+        "class Greeter:\n"
+        "    def connect(self, sender: object = ...) -> callable: ...\n"
+        "    def greet(self) -> str: ..."
+    )
+    code = (
+        "from greeting import Greeter\n"
+        "greeter = Greeter()\n"
+        "def handler(value):\n    return value\n"
+        "greeter.connect(handler)\n"
+        "assert greeter.greet() == 'hello'\n"
+    )
+
+    with pytest.raises(BehaviorProbeError, match="without applying the returned decorator"):
+        validate_behavior_probe_suite(_suite(code), architecture)
+
+
+def test_probe_revisions_accumulate_independently_valid_requirements():
+    initial = _suite()
+    initial["probes"][1]["code"] = "from greeting import greeting\nassert True"
+    revised = _suite()
+    revised["probes"][0]["code"] = "from greeting import greeting\nassert True"
+
+    class ProgressiveProber:
+        def design(self, *args, **kwargs):
+            return initial
+
+        def revise(self, *args, **kwargs):
+            return revised
+
+    runner = CleanRunner.__new__(CleanRunner)
+    runner.max_repairs = 1
+    runner.behavior_prober = ProgressiveProber()
+
+    retained = runner._design_behavior_probes(
+        "approved specification", _architecture(), _manifest()
+    )
+
+    assert {probe["requirement_ids"][0] for probe in retained["probes"]} == {
+        "FR-001",
+        "AC-001",
+    }
+
+
 def test_exception_failure_guard_remains_valid(tmp_path):
     workspace = CleanWorkspace(tmp_path / 'output')
     workspace.write_generated_file('greeting.py', 'def greeting():\n    raise ValueError("invalid")\n')

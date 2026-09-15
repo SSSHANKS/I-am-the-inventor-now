@@ -885,42 +885,68 @@ class CleanRunner:
                 manifest,
                 target_capability=capability,
             )
+            accepted_by_requirement: dict[str, dict[str, Any]] = {}
             for repair_number in range(self.max_repairs + 1):
+                rejected_messages: list[str] = []
+                architecture_error = None
                 try:
-                    suite = CleanBehaviorProbeSuiteSchema().load(suite)
+                    candidates = CleanBehaviorProbeSuiteSchema().load(suite)
+                except Exception as exc:
+                    candidates = {"schema_version": 1, "probes": []}
+                    rejected_messages.append(f"{type(exc).__name__}: {exc}")
+                for probe in candidates["probes"]:
+                    requirement_ids = probe.get("requirement_ids", [])
+                    requirement_id = (
+                        str(requirement_ids[0]) if len(requirement_ids) == 1 else None
+                    )
+                    try:
+                        validate_behavior_probe_suite(
+                            {"schema_version": 1, "probes": [probe]},
+                            scoped_architecture,
+                            require_complete=False,
+                        )
+                    except Exception as exc:
+                        from packages.modules.clean.probe_contracts import ProbeArchitectureError
+
+                        if isinstance(exc, ProbeArchitectureError):
+                            architecture_error = exc
+                        rejected_messages.append(f"{type(exc).__name__}: {exc}")
+                        log.warning("Discarding invalid behavior probe: %s", exc)
+                        continue
+                    assert requirement_id is not None
+                    existing = accepted_by_requirement.get(requirement_id)
+                    required_scenarios = set(capability["scenario_ids"])
+                    if existing is None or (
+                        set(probe["scenario_ids"]) & required_scenarios
+                        and not set(existing["scenario_ids"]) & required_scenarios
+                    ):
+                        accepted_by_requirement[requirement_id] = probe
+
+                accepted = [
+                    deepcopy(probe)
+                    for _, probe in sorted(accepted_by_requirement.items())
+                ]
+                for index, probe in enumerate(accepted, start=1):
+                    probe["probe_id"] = f"PROBE-{index:03d}"
+                partial_suite = {"schema_version": 1, "probes": accepted}
+                try:
                     suite = validate_behavior_probe_suite(
-                        suite, scoped_architecture
+                        partial_suite, scoped_architecture
                     )
                     break
                 except Exception as exc:
+                    rejected_messages.append(f"{type(exc).__name__}: {exc}")
                     if repair_number >= self.max_repairs:
-                        from packages.modules.clean.probe_contracts import ProbeArchitectureError
-                        if isinstance(exc, ProbeArchitectureError):
-                            raise
-                        # Retain only probes that pass every execution-policy and
-                        # ownership check; missing coverage is reported separately.
-                        candidates = CleanBehaviorProbeSuiteSchema().load(suite)
-                        accepted = []
-                        for probe in candidates["probes"]:
-                            partial = {"schema_version": 1, "probes": [*accepted, probe]}
-                            try:
-                                validate_behavior_probe_suite(
-                                    partial, scoped_architecture, require_complete=False
-                                )
-                            except ValueError as rejected:
-                                if isinstance(rejected, ProbeArchitectureError):
-                                    raise
-                                log.warning("Discarding invalid behavior probe: %s", rejected)
-                            else:
-                                accepted.append(probe)
-                        suite = {"schema_version": 1, "probes": accepted}
+                        if architecture_error is not None:
+                            raise architecture_error from exc
+                        suite = partial_suite
                         break
                     suite = self.behavior_prober.revise(
                         specification,
                         architecture,
                         manifest,
-                        suite,
-                        f"{type(exc).__name__}: {exc}",
+                        partial_suite,
+                        "\n".join(dict.fromkeys(rejected_messages)),
                         target_capability=capability,
                     )
             combined.extend(suite["probes"])

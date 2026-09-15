@@ -305,7 +305,11 @@ When tests are read-only related context, preserve them as the behavioral oracle
 repair the allowed implementation files to satisfy them.
 Cluster failing probes by shared state, ownership, dispatch, and cleanup mechanisms before
 editing. Prefer one causal repair that resolves a cluster over independent assertion-shaped
-special cases. For weak-reference behavior, ensure every stored object graph is actually
+special cases. Trace registration selectors through the same normalization and lookup
+rules used by query, synchronous dispatch, asynchronous dispatch, and removal. A default
+or wildcard registration key must be discoverable from every operation that promises the
+fallback scope; do not represent the same scope with unrelated sentinel values.
+For weak-reference behavior, ensure every stored object graph is actually
 weak: a wrapper, callback, cleanup closure, cache, or inspection helper must not retain the
 referent strongly. Dereference only at the point of use, and preserve coroutine inspection
 without storing a strong copy of the callback. For context-managed registration, trace the

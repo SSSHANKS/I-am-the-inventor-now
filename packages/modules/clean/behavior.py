@@ -360,6 +360,9 @@ def _validate_probe_semantics(
         )
 
     _reject_disposable_weak_callbacks(probe["probe_id"], tree)
+    _reject_unapplied_decorator_factories(
+        probe["probe_id"], tree, relevant_contracts
+    )
     _validate_initialization_probe_focus(probe["probe_id"], tree, own_text)
     _validate_lifecycle_observer_path(probe["probe_id"], tree, own_text)
 
@@ -435,6 +438,56 @@ def _reject_disposable_weak_callbacks(probe_id: str, tree: ast.Module) -> None:
             raise BehaviorProbeError(
                 f"Probe {probe_id} registers a disposable lambda through a potentially "
                 "weak connection; retain a named callback or request strong ownership"
+            )
+
+
+def _reject_unapplied_decorator_factories(
+    probe_id: str,
+    tree: ast.Module,
+    contracts: list[dict[str, Any]],
+) -> None:
+    factory_methods: set[str] = set()
+    for contract in contracts:
+        declaration = str(contract.get("declaration", ""))
+        try:
+            parsed = ast.parse(declaration)
+        except SyntaxError:
+            continue
+        for node in ast.walk(parsed):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            parameters = [argument.arg for argument in node.args.args]
+            if parameters and parameters[0] in {"self", "cls"}:
+                parameters = parameters[1:]
+            if not parameters or parameters[0].casefold() in {
+                "callback",
+                "callable",
+                "function",
+                "handler",
+                "listener",
+                "receiver",
+                "target",
+            }:
+                continue
+            if _call_name(node.returns).casefold() in {"callable", "decorator"}:
+                factory_methods.add(node.name)
+    if not factory_methods:
+        return
+    defined_callables = {
+        node.name
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    for statement in tree.body:
+        if not isinstance(statement, ast.Expr) or not isinstance(statement.value, ast.Call):
+            continue
+        call = statement.value
+        if _call_name(call.func).rsplit(".", 1)[-1] not in factory_methods:
+            continue
+        if call.args and isinstance(call.args[0], ast.Name) and call.args[0].id in defined_callables:
+            raise BehaviorProbeError(
+                f"Probe {probe_id} passes a callback to decorator factory "
+                f"{_call_name(call.func)!r} without applying the returned decorator"
             )
 
 
