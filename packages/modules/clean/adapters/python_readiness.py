@@ -14,6 +14,10 @@ from pathlib import Path
 from typing import Any
 
 from packages.modules.clean.diagnostics import CleanDiagnostic
+from packages.modules.clean.python_contract_paths import (
+    python_contract_module,
+    python_contract_target,
+)
 
 _IMPORT_SCRIPT = """
 import importlib
@@ -324,7 +328,7 @@ class LocalPythonReadinessExecutor:
 def _public_modules(architecture: dict[str, Any]) -> list[str]:
     return sorted(
         {
-            str(item["qualified_name"]).rsplit(".", 1)[0]
+            python_contract_module(item, architecture["contracts"])
             for item in architecture["contracts"]
             if item["visibility"] == "public" and "." in str(item["qualified_name"])
         }
@@ -339,7 +343,7 @@ def _entry_targets(architecture: dict[str, Any]) -> list[str]:
     }
     return sorted(
         {
-            _target(item["qualified_name"])
+            python_contract_target(item, architecture["contracts"])
             for item in architecture["contracts"]
             if item["contract_id"] in contract_ids
         }
@@ -355,11 +359,6 @@ def _missing_wheel_modules(wheel: Path, modules: list[str]) -> list[str]:
         if f"{relative}.py" not in members and f"{relative}/__init__.py" not in members:
             missing.append(module)
     return missing
-
-
-def _target(qualified_name: str) -> str:
-    module, separator, attribute = str(qualified_name).rpartition(".")
-    return f"{module}:{attribute}" if separator else str(qualified_name)
 
 
 def _environment(temp_root: Path) -> dict[str, str]:

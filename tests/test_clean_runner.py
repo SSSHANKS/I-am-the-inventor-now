@@ -21,7 +21,13 @@ from packages.modules.clean import (
 )
 from packages.modules.clean.behavior import LocalPythonBehaviorProbeExecutor
 from packages.modules.clean.manifest import architecture_sha256
-from packages.modules.clean.runner import _normalise_plan, _repair_context, _repair_paths
+from packages.modules.clean.runner import (
+    _build_succeeded,
+    _normalise_plan,
+    _repair_context,
+    _repair_paths,
+    _safe_error,
+)
 from packages.modules.clean.workspace import CleanWorkspace, WorkspaceError
 from packages.modules.handoff import export_clean_handoff
 
@@ -31,6 +37,113 @@ SPECIFICATION = """# Greeting Project
 
 - FR-001: A greeting operation returns the text hello.
 """
+
+
+def test_clean_repair_diagnostic_preserves_actionable_validation_details():
+    error = WorkspaceError(
+        "Architecture does not allocate requirements to capabilities: AC-001, AC-002"
+    )
+
+    assert _safe_error(error) == (
+        "WorkspaceError: Architecture does not allocate requirements to capabilities: "
+        "AC-001, AC-002"
+    )
+
+
+def test_clean_repair_diagnostic_redacts_host_paths():
+    error = WorkspaceError(
+        r"Validation failed in C:\Users\person\private-workspace\project.py"
+    )
+
+    diagnostic = _safe_error(error)
+
+    assert "C:\\Users" not in diagnostic
+    assert "person" not in diagnostic
+    assert "<host-path>" in diagnostic
+
+
+def test_skipped_behavior_probes_keep_an_executable_build_partial():
+    checks = [
+        {
+            "name": name,
+            "status": "pass",
+            "message": "Passed",
+            "paths": [],
+        }
+        for name in (
+            "planned-files-present",
+            "no-unplanned-files",
+            "entry-points-present",
+            "utf8-text",
+            "syntax",
+            "executable-validation",
+        )
+    ]
+    assert _build_succeeded(checks)
+
+    checks.append(
+        {
+            "name": "python-behavior-probes",
+            "status": "skipped",
+            "message": "Probe design unavailable",
+            "paths": [],
+        }
+    )
+
+    assert not _build_succeeded(checks)
+
+
+def test_missing_behavior_suite_is_reported_without_blocking_static_validation():
+    class PassingAdapter:
+        @staticmethod
+        def validate_project(*_args, **_kwargs):
+            return [
+                {
+                    "name": name,
+                    "status": "pass",
+                    "message": "Passed",
+                    "paths": [],
+                }
+                for name in (
+                    "planned-files-present",
+                    "no-unplanned-files",
+                    "entry-points-present",
+                    "utf8-text",
+                    "syntax",
+                )
+            ]
+
+        @staticmethod
+        def validate_readiness(*_args, **_kwargs):
+            return [
+                {
+                    "name": "executable-validation",
+                    "status": "pass",
+                    "message": "Readiness passed",
+                    "paths": [],
+                }
+            ]
+
+    runner = CleanRunner.__new__(CleanRunner)
+    runner.syntax_checks = True
+    runner.behavior_executor = object()
+
+    checks = runner._validate(
+        None,
+        {},
+        [],
+        runtime_adapter=PassingAdapter(),
+        architecture={},
+        manifest={},
+        behavior_probe_design_failure="BehaviorProbeError: weak assertion",
+    )
+    behavior = next(
+        check for check in checks if check["name"] == "python-behavior-probes"
+    )
+
+    assert behavior["status"] == "skipped"
+    assert "weak assertion" in behavior["message"]
+    assert all(check["status"] != "fail" for check in checks)
 
 
 def _plan():
@@ -647,7 +760,7 @@ def test_clean_runner_reports_failure_when_repair_budget_is_zero(tmp_path):
     assert result.report_path.is_file()
 
 
-def test_clean_runner_stops_when_repair_repeats_the_same_failure(tmp_path):
+def test_clean_runner_retries_changed_content_with_same_failure(tmp_path):
     handoff = export_clean_handoff(
         tmp_path / "handoff", SPECIFICATION, {"status": "pass"}
     )
@@ -696,7 +809,7 @@ def test_clean_runner_stops_when_repair_repeats_the_same_failure(tmp_path):
                             ),
                         }
                     ],
-                    "rationale": "This response must not be requested.",
+                    "rationale": "Use the remaining repair attempt to fix the contract.",
                 }
             ),
         ]
@@ -710,16 +823,20 @@ def test_clean_runner_stops_when_repair_repeats_the_same_failure(tmp_path):
 
     result = runner.run(handoff, tmp_path / "output")
 
-    assert result.report["repair_rounds"] == 1
-    assert result.report["repair_stop_reason"] == "repeated-failure-fingerprint"
-    assert repair_client.call_count == 1
+    assert not any(
+        check["status"] == "fail" for check in result.report["checks"]
+    )
+    assert result.report["repair_rounds"] == 2
+    assert result.report["repair_stop_reason"] is None
+    assert repair_client.call_count == 2
     record = json.loads(
         (result.output_root / "_clean/iterations/repair-1.json").read_text(
             encoding="utf-8"
         )
     )
-    assert record["outcome"] == "stalled"
-    assert record["stop_reason"] == "repeated-failure-fingerprint"
+    assert record["outcome"] == "changed"
+    assert record["stop_reason"] is None
+    assert record["failure_fingerprint_repeated"] is True
     assert record["changed_paths"] == ["greeting.py"]
     assert (
         record["before_failure_fingerprint"]
@@ -729,6 +846,7 @@ def test_clean_runner_stops_when_repair_repeats_the_same_failure(tmp_path):
         record["before_content_hashes"]["greeting.py"]
         != record["after_content_hashes"]["greeting.py"]
     )
+    assert "<repair_attempt>\n2\n</repair_attempt>" in repair_client.prompts[1]
 
 
 def test_clean_repair_receives_read_only_dependent_context(tmp_path):

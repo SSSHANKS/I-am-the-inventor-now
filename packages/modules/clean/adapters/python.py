@@ -7,11 +7,13 @@ from typing import Any, ClassVar
 
 from packages.modules.clean.adapters.base import ReadinessExecutor, RuntimeAdapterError
 from packages.modules.clean.adapters.generic import _validate_declared_operations
+from packages.modules.clean.adapters.python_metadata import normalise_python_metadata
 from packages.modules.clean.adapters.python_packaging import (
     python_manifest_readiness_issues,
     validate_python_packaging,
 )
 from packages.modules.clean.manifest import normalise_manifest
+from packages.modules.clean.python_contract_paths import python_contract_module
 from packages.modules.clean.validation import validate_project
 from packages.modules.clean.workspace import CleanWorkspace
 
@@ -81,7 +83,9 @@ class PythonRuntimeAdapter:
                     )
                 )
         contracts = {
-            item["contract_id"]: str(item["qualified_name"]).rsplit(".", 1)[0]
+            item["contract_id"]: python_contract_module(
+                item, architecture["contracts"]
+            )
             for item in architecture["contracts"]
         }
         modules = set(contracts.values())
@@ -151,21 +155,9 @@ class PythonRuntimeAdapter:
             normalised["files"] = [
                 task for task in normalised["files"] if id(task) not in removed_ids
             ]
+        renames.update(_package_surface_renames(normalised, layout=layout))
         if renames:
-            for task in normalised["files"]:
-                task["depends_on"] = list(
-                    dict.fromkeys(
-                        renames.get(item, item)
-                        for item in task["depends_on"]
-                        if renames.get(item, item) != task["path"]
-                    )
-                )
-            for binding in normalised["entry_points"]:
-                binding["path"] = renames.get(binding["path"], binding["path"])
-            for obligation in normalised["readiness_obligations"]:
-                obligation["paths"] = list(
-                    dict.fromkeys(renames.get(item, item) for item in obligation["paths"])
-                )
+            _apply_manifest_path_renames(normalised, renames)
         return normalised
 
     def normalise_generated_content(
@@ -176,14 +168,15 @@ class PythonRuntimeAdapter:
         manifest: dict[str, Any],
     ) -> str:
         """Remove a mistaken source-root prefix from unambiguous internal imports."""
-        del manifest
+        if path == "pyproject.toml":
+            return normalise_python_metadata(content, architecture, manifest)
         if not path.endswith(".py"):
             return content
         layout = str(architecture["project_profile"]["layout"]).strip().casefold()
         if layout != "src":
             return content
         modules = {
-            str(item["qualified_name"]).rsplit(".", 1)[0]
+            python_contract_module(item, architecture["contracts"])
             for item in architecture["contracts"]
         }
 
@@ -275,3 +268,51 @@ def _python_module_path(module: str, *, modules: set[str], layout: str) -> str:
     is_package = any(item.startswith(module + ".") for item in modules)
     relative = PurePosixPath(*parts)
     return str(prefix / relative / "__init__.py") if is_package else str(prefix / relative) + ".py"
+
+
+def _package_surface_renames(
+    manifest: dict[str, Any],
+    *,
+    layout: str,
+) -> dict[str, str]:
+    """Promote a module to a package when planned source descendants require it."""
+    source_paths = {
+        str(item["path"])
+        for item in manifest["files"]
+        if item["category"] == "source" and str(item["path"]).endswith(".py")
+    }
+    prefix = "src/" if layout == "src" else ""
+    renames: dict[str, str] = {}
+    for path in sorted(source_paths):
+        pure = PurePosixPath(path)
+        if pure.name == "__init__.py" or not path.startswith(prefix):
+            continue
+        package_root = pure.with_suffix("").as_posix()
+        package_init = f"{package_root}/__init__.py"
+        if package_init in source_paths:
+            continue
+        if any(item.startswith(f"{package_root}/") for item in source_paths):
+            renames[path] = package_init
+    return renames
+
+
+def _apply_manifest_path_renames(
+    manifest: dict[str, Any],
+    renames: dict[str, str],
+) -> None:
+    for task in manifest["files"]:
+        old_path = task["path"]
+        task["path"] = renames.get(old_path, old_path)
+        task["depends_on"] = list(
+            dict.fromkeys(
+                renames.get(item, item)
+                for item in task["depends_on"]
+                if renames.get(item, item) != task["path"]
+            )
+        )
+    for binding in manifest["entry_points"]:
+        binding["path"] = renames.get(binding["path"], binding["path"])
+    for obligation in manifest["readiness_obligations"]:
+        obligation["paths"] = list(
+            dict.fromkeys(renames.get(item, item) for item in obligation["paths"])
+        )

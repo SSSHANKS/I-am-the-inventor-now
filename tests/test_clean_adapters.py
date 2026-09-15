@@ -270,6 +270,114 @@ def test_python_adapter_consolidates_same_component_contracts_in_one_module():
     ]
 
 
+def test_python_adapter_places_class_member_contract_with_its_class():
+    architecture = {
+        "project_profile": {"language": "Python", "layout": "src"},
+        "contracts": [
+            {
+                "contract_id": "SYM-001",
+                "qualified_name": "project_x.core.Emitter",
+                "kind": "class",
+            },
+            {
+                "contract_id": "SYM-002",
+                "qualified_name": "project_x.core.Emitter.connect",
+                "kind": "function",
+            },
+        ],
+    }
+    manifest = {
+        "files": [
+            {
+                "path": "src/project_x/emitter.py",
+                "category": "source",
+                "component_id": "CMP-001",
+                "purpose": "Emit events",
+                "requirement_ids": ["FR-001"],
+                "provides": ["SYM-001", "SYM-002"],
+                "requires": [],
+                "depends_on": [],
+                "generation_order": 1,
+                "local_validators": ["syntax"],
+                "integration_checks": [],
+            }
+        ],
+        "entry_points": [],
+        "readiness_obligations": [],
+    }
+
+    result = PythonRuntimeAdapter().normalise_manifest(architecture, manifest)
+
+    assert result["files"][0]["path"] == "src/project_x/core.py"
+    assert result["files"][0]["provides"] == ["SYM-001", "SYM-002"]
+
+
+def test_python_adapter_promotes_root_module_when_submodules_are_planned():
+    architecture = {
+        "project_profile": {"language": "Python", "layout": "src"},
+        "contracts": [
+            {
+                "contract_id": "SYM-001",
+                "qualified_name": "eventlib.Emitter",
+                "kind": "class",
+            }
+        ],
+    }
+    manifest = {
+        "files": [
+            {
+                "path": "src/eventlib.py",
+                "category": "source",
+                "component_id": "CMP-001",
+                "purpose": "Public API",
+                "requirement_ids": ["FR-001"],
+                "provides": ["SYM-001"],
+                "requires": [],
+                "depends_on": [],
+                "generation_order": 1,
+                "local_validators": ["syntax"],
+                "integration_checks": [],
+            },
+            {
+                "path": "src/eventlib/emitter.py",
+                "category": "source",
+                "component_id": "CMP-002",
+                "purpose": "Emitter internals",
+                "requirement_ids": [],
+                "provides": [],
+                "requires": ["SYM-001"],
+                "depends_on": ["src/eventlib.py"],
+                "generation_order": 2,
+                "local_validators": ["syntax"],
+                "integration_checks": [],
+            },
+        ],
+        "entry_points": [
+            {"entry_point_id": "EP-001", "path": "src/eventlib.py"}
+        ],
+        "readiness_obligations": [
+            {
+                "obligation_id": "READY-001",
+                "paths": ["src/eventlib.py", "src/eventlib/emitter.py"],
+            }
+        ],
+    }
+
+    result = PythonRuntimeAdapter().normalise_manifest(architecture, manifest)
+
+    assert [item["path"] for item in result["files"]] == [
+        "src/eventlib/__init__.py",
+        "src/eventlib/emitter.py",
+    ]
+    assert result["files"][1]["depends_on"] == ["src/eventlib/__init__.py"]
+    assert result["entry_points"][0]["path"] == "src/eventlib/__init__.py"
+    assert result["readiness_obligations"][0]["paths"] == [
+        "src/eventlib/__init__.py",
+        "src/eventlib/emitter.py",
+    ]
+    assert manifest["files"][0]["path"] == "src/eventlib.py"
+
+
 def test_python_adapter_runs_exact_contract_validation(tmp_path):
     workspace = CleanWorkspace(tmp_path / "output")
     workspace.write_generated_file(

@@ -38,6 +38,12 @@ generated tests. Components form an acyclic dependency graph. A capability may s
 multiple components, but those components together must own all of its requirements.
 Every contract belongs to one component and may claim only requirements owned by that
 component. Do not use filenames to stand in for components.
+For Python classes, prefer one class contract whose declaration contains its public
+stub methods. If the specification requires a separately traceable member contract,
+qualify it beneath an explicitly declared class (for example,
+`package.module.ClassName.method`) and keep it in the same component as that class.
+Label assignment declarations as `constant`, including module export declarations such
+as `__all__ = [...]`; never label an assignment as a function.
 
 The runtime policy states only capabilities available to later deterministic adapters.
 Do not claim a language, dependency, build system, layout, or executable check that the
@@ -236,6 +242,9 @@ Treat each structured diagnostic as an exact repair obligation. Its diagnostic I
 check ID, expected value, actual value, contract IDs, and requirement IDs are
 authoritative. Resolve the reported mismatch in the replacement itself; a rationale
 does not count as resolution. Never return content identical to the current file.
+The repair attempt number is included in the prompt. On later attempts, assume an
+earlier replacement changed the file but did not resolve the listed diagnostics; compare
+every expected and actual contract field literally before returning the next replacement.
 Repair the underlying behavior, not only the first exception shown in a traceback.
 Inspect all current tests and related cases for the failed operation, and handle the
 full stated input and failure category without weakening assertions or deleting tests.

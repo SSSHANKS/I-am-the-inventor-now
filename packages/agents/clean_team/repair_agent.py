@@ -21,6 +21,7 @@ class CleanRepairAgent(BaseAgent):
         allowed_paths: set[str],
         *,
         compatibility_mode: str = "renamed",
+        attempt_number: int = 1,
         related_files: dict[str, str] | None = None,
         omitted_related_paths: list[str] | None = None,
     ) -> dict[str, Any]:
@@ -29,6 +30,9 @@ class CleanRepairAgent(BaseAgent):
             "<compatibility_mode>\n"
             f"{compatibility_mode}\n"
             "</compatibility_mode>\n"
+            "<repair_attempt>\n"
+            f"{attempt_number}\n"
+            "</repair_attempt>\n"
             "<relevant_specification_context>\n"
             f"{specification_context}\n"
             "</relevant_specification_context>\n"

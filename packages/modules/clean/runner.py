@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 from copy import deepcopy
 from dataclasses import dataclass
@@ -52,6 +53,8 @@ from packages.modules.supervising.schemas import (
     CleanManifestSchema,
     CleanPlanSchema,
 )
+
+log = logging.getLogger(__name__)
 
 
 class CleanBuildError(Exception):
@@ -130,6 +133,7 @@ class CleanRunner:
         manifest: dict[str, Any] | None = None
         runtime_adapter: RuntimeAdapter | None = None
         behavior_suite: dict[str, Any] | None = None
+        behavior_probe_design_failure: str | None = None
         validation_policy: dict[str, Any]
         try:
             prepared_specification = prepare_specification(handoff.specification)
@@ -154,11 +158,19 @@ class CleanRunner:
                     validation_policy=validation_policy,
                 )
                 if self.behavior_prober is not None:
-                    behavior_suite = self._design_behavior_probes(
-                        prepared_specification.text,
-                        architecture,
-                        manifest,
-                    )
+                    try:
+                        behavior_suite = self._design_behavior_probes(
+                            prepared_specification.text,
+                            architecture,
+                            manifest,
+                        )
+                    except Exception as exc:
+                        behavior_probe_design_failure = _safe_error(exc)
+                        log.warning(
+                            "Behavior probe design unavailable; project generation "
+                            "will continue with degraded validation: %s",
+                            behavior_probe_design_failure,
+                        )
                 plan = _compatibility_plan(architecture, manifest)
                 self._validate_plan(
                     plan,
@@ -277,6 +289,7 @@ class CleanRunner:
             architecture=architecture,
             manifest=manifest,
             behavior_suite=behavior_suite,
+            behavior_probe_design_failure=behavior_probe_design_failure,
         )
         repairs_used = 0
         structural_repairs_used = 0
@@ -335,10 +348,16 @@ class CleanRunner:
                     current,
                     allowed,
                     compatibility_mode=handoff.compatibility_mode,
+                    attempt_number=stage_repairs_used + 1,
                     related_files=related,
                     omitted_related_paths=omitted_related,
                 )
                 replacements = repair["replacements"]
+                if runtime_adapter is not None:
+                    for replacement in replacements:
+                        replacement["content"] = runtime_adapter.normalise_generated_content(
+                            replacement["path"], replacement["content"], architecture, manifest
+                        )
                 paths = [item["path"] for item in replacements]
                 if len(paths) != len(set(paths)) or not paths:
                     raise WorkspaceError("Repair must return unique replacement paths")
@@ -389,6 +408,7 @@ class CleanRunner:
                     architecture=architecture,
                     manifest=manifest,
                     behavior_suite=behavior_suite,
+                    behavior_probe_design_failure=behavior_probe_design_failure,
                 )
                 after_failure_fingerprint = failure_fingerprint(checks)
                 after_contents = {
@@ -400,8 +420,6 @@ class CleanRunner:
                     not checks_passed(checks)
                     and after_failure_fingerprint == before_failure_fingerprint
                 )
-                if stalled:
-                    repair_stop_reason = "repeated-failure-fingerprint"
                 workspace.write_metadata_json(
                     f"iterations/repair-{repairs_used}.json",
                     {
@@ -414,9 +432,10 @@ class CleanRunner:
                         "outcome": (
                             "resolved"
                             if checks_passed(checks)
-                            else ("stalled" if stalled else "changed")
+                            else "changed"
                         ),
-                        "stop_reason": repair_stop_reason if stalled else None,
+                        "stop_reason": None,
+                        "failure_fingerprint_repeated": stalled,
                         "before_failure_fingerprint": before_failure_fingerprint,
                         "after_failure_fingerprint": after_failure_fingerprint,
                         "before_content_hashes": before_content_hashes,
@@ -424,8 +443,6 @@ class CleanRunner:
                         **scoped_context.audit_record(),
                     },
                 )
-                if stalled:
-                    break
             except Exception as exc:
                 generation_failures.append(
                     _failed_check(
@@ -444,6 +461,7 @@ class CleanRunner:
                     architecture=architecture,
                     manifest=manifest,
                     behavior_suite=behavior_suite,
+                    behavior_probe_design_failure=behavior_probe_design_failure,
                 )
 
         report = self._build_report(
@@ -594,6 +612,7 @@ class CleanRunner:
         architecture: dict[str, Any] | None = None,
         manifest: dict[str, Any] | None = None,
         behavior_suite: dict[str, Any] | None = None,
+        behavior_probe_design_failure: str | None = None,
     ) -> list[dict[str, Any]]:
         static_checks = (
             runtime_adapter.validate_project(
@@ -630,8 +649,23 @@ class CleanRunner:
                 manifest,
             )
             checks.extend(readiness_checks)
-            if self.behavior_executor is not None and behavior_suite is not None:
-                if any(item["status"] == "fail" for item in readiness_checks):
+            if self.behavior_executor is not None:
+                if behavior_suite is None:
+                    checks.append(
+                        {
+                            "name": "python-behavior-probes",
+                            "status": "skipped",
+                            "message": (
+                                "Probe design unavailable: "
+                                + (
+                                    behavior_probe_design_failure
+                                    or "no validated probe suite was produced"
+                                )
+                            ),
+                            "paths": [],
+                        }
+                    )
+                elif any(item["status"] == "fail" for item in readiness_checks):
                     checks.append(
                         {
                             "name": "python-behavior-probes",
@@ -904,11 +938,10 @@ class CleanRunner:
         behavior_suite: dict[str, Any] | None,
         runtime_adapter_id: str | None,
     ) -> dict[str, Any]:
-        static_checks_passed = checks_passed(checks)
         validation_level = _validation_level(checks)
         # Static validation proves only shape. Success requires the configured runtime
         # gates, including the frozen behavior suite when executable checks are enabled.
-        success = static_checks_passed and validation_level == "executable"
+        success = _build_succeeded(checks)
         generated = {
             path: workspace.content_hash(path) for path in workspace.list_generated_files()
         }
@@ -1592,9 +1625,20 @@ def _json_hash(value: Any) -> str:
 
 
 def _safe_error(exc: Exception) -> str:
-    # Exception text can include provider config or host filesystem paths. The type is
-    # enough to classify the Clean-side failure without feeding host data to repair.
-    return f"{type(exc).__name__}: Clean operation failed"
+    """Keep actionable Clean diagnostics while withholding host filesystem paths."""
+    message = str(exc).strip()
+    if not message:
+        return f"{type(exc).__name__}: Clean operation failed"
+    message = re.sub(
+        r"(?i)(?:[a-z]:[\\/]|\\\\)[^\r\n\"'<>]*",
+        "<host-path>",
+        message,
+    )
+    message = re.sub(r"[\r\n\t]+", " ", message)
+    message = re.sub(r"\s{2,}", " ", message).strip()
+    if len(message) > 2000:
+        message = message[:1997].rstrip() + "..."
+    return f"{type(exc).__name__}: {message}"
 
 
 def _failed_check(
@@ -1648,3 +1692,16 @@ def _validation_level(checks: list[dict[str, Any]]) -> str:
             return "executable"
         return "syntax"
     return "structure"
+
+
+def _build_succeeded(checks: list[dict[str, Any]]) -> bool:
+    """Require executable readiness and completed probes when probes were configured."""
+    behavior_validation_complete = not any(
+        check["name"] == "python-behavior-probes" and check["status"] != "pass"
+        for check in checks
+    )
+    return (
+        checks_passed(checks)
+        and _validation_level(checks) == "executable"
+        and behavior_validation_complete
+    )

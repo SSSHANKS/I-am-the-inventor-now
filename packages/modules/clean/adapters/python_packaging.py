@@ -6,6 +6,10 @@ from pathlib import PurePosixPath
 from typing import Any
 
 from packages.modules.clean.diagnostics import CleanDiagnostic
+from packages.modules.clean.python_contract_paths import (
+    python_contract_module,
+    python_contract_target,
+)
 from packages.modules.clean.workspace import CleanWorkspace, WorkspaceError
 
 _NO_BUILD_SYSTEMS = frozenset({"none", "no-build", "stdlib", "not-applicable"})
@@ -122,12 +126,29 @@ def _layout_check(
     contracts = {item["contract_id"]: item for item in architecture["contracts"]}
     issues: list[str] = []
     paths: list[str] = []
+    module_paths: dict[str, list[str]] = {}
+    for task in manifest["files"]:
+        if task["category"] != "source" or not task["path"].endswith(".py"):
+            continue
+        module_paths.setdefault(
+            _module_name(task["path"], layout=layout), []
+        ).append(task["path"])
+    for module, providers in sorted(module_paths.items()):
+        if len(providers) < 2:
+            continue
+        paths.extend(providers)
+        issues.append(
+            f"module {module!r} has multiple source paths: "
+            + ", ".join(sorted(providers))
+        )
     for task in manifest["files"]:
         if task["category"] != "source" or not task["path"].endswith(".py"):
             continue
         for contract_id in task["provides"]:
             contract = contracts[contract_id]
-            expected_module = str(contract["qualified_name"]).rsplit(".", 1)[0]
+            expected_module = python_contract_module(
+                contract, architecture["contracts"]
+            )
             actual_module = _module_name(task["path"], layout=layout)
             if actual_module != expected_module:
                 paths.append(task["path"])
@@ -339,7 +360,8 @@ def _entry_point_check(
         if item["contract_id"] in entry_ids
     }
     expected_targets = {
-        _entry_target(item["qualified_name"]) for item in contracts.values()
+        python_contract_target(item, architecture["contracts"])
+        for item in contracts.values()
     }
     actual_targets = {str(value).strip() for value in scripts.values()}
     invalid = sorted(actual_targets - expected_targets)
@@ -379,11 +401,6 @@ def _pyproject_path(manifest: dict[str, Any]) -> str | None:
 
 def _canonical_dependency(value: str) -> str:
     return re.sub(r"[-_.]+", "-", value.strip().casefold())
-
-
-def _entry_target(qualified_name: str) -> str:
-    module, separator, callable_name = str(qualified_name).rpartition(".")
-    return f"{module}:{callable_name}" if separator else str(qualified_name)
 
 
 def _passed(name: str, paths: list[str] | None = None) -> dict[str, Any]:

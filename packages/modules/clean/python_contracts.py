@@ -6,6 +6,8 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
+from packages.modules.clean.python_contract_paths import python_contract_attributes
+
 _CALLABLE_KINDS = frozenset({"function", "decorator"})
 _CLASS_KINDS = frozenset({"class", "exception", "protocol"})
 _TYPING_NAMES = frozenset(
@@ -86,10 +88,15 @@ def python_contract_declaration_error(contract: dict[str, Any]) -> str | None:
     if kind == "constant":
         declaration = _parse_constant_signature(signature)
         if declaration is None:
-            return f"invalid constant signature {signature!r}; expected 'NAME: type'"
-        if declaration.target.id != name:
             return (
-                f"signature name {declaration.target.id!r} does not match qualified "
+                f"invalid constant signature {signature!r}; expected "
+                "'NAME: type' or 'NAME = value'"
+            )
+        declaration_name = _constant_name(declaration)
+        assert declaration_name is not None
+        if declaration_name != name:
+            return (
+                f"signature name {declaration_name!r} does not match qualified "
                 f"name {name!r}"
             )
     return None
@@ -125,7 +132,7 @@ def find_python_contract_issues(
             continue
         tree = ast.parse(contents[path], filename=path)
         name = str(contract["qualified_name"]).rsplit(".", 1)[-1]
-        binding = _top_level_bindings(tree).get(name)
+        binding = _contract_binding(tree, contract, plan["symbol_contracts"])
         if binding is None:
             issues.append(
                 PythonContractIssue(
@@ -166,9 +173,29 @@ def find_python_contract_issues(
     return issues
 
 
+def _contract_binding(
+    tree: ast.Module,
+    contract: dict[str, Any],
+    contracts: list[dict[str, Any]],
+) -> ast.AST | None:
+    attributes = python_contract_attributes(contract, contracts)
+    if not attributes:
+        return None
+    binding = _top_level_bindings(tree).get(attributes[0])
+    for attribute in attributes[1:]:
+        if not isinstance(binding, ast.ClassDef):
+            return None
+        binding = _body_bindings(binding.body).get(attribute)
+    return binding
+
+
 def _top_level_bindings(tree: ast.Module) -> dict[str, ast.AST]:
+    return _body_bindings(tree.body)
+
+
+def _body_bindings(body: list[ast.stmt]) -> dict[str, ast.AST]:
     bindings: dict[str, ast.AST] = {}
-    for node in tree.body:
+    for node in body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             bindings[node.name] = node
         elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
@@ -234,9 +261,20 @@ def _signature_mismatch(binding: ast.AST, contract: dict[str, Any]) -> str | Non
     else:
         declaration = _parse_constant_signature(expected)
         assert declaration is not None
-        actual_annotation = binding.annotation if isinstance(binding, ast.AnnAssign) else None
-        if _annotation(actual_annotation) != _annotation(declaration.annotation):
-            return f"annotation does not match contracted signature {expected!r}"
+        if isinstance(declaration, ast.AnnAssign):
+            actual_annotation = (
+                binding.annotation if isinstance(binding, ast.AnnAssign) else None
+            )
+            if _annotation(actual_annotation) != _annotation(declaration.annotation):
+                return f"annotation does not match contracted signature {expected!r}"
+        else:
+            actual_value = (
+                binding.value
+                if isinstance(binding, (ast.Assign, ast.AnnAssign))
+                else None
+            )
+            if _expression(actual_value) != _expression(declaration.value):
+                return f"value does not match contracted assignment {expected!r}"
     return None
 
 
@@ -248,15 +286,9 @@ def _actual_contract_declaration(
     if isinstance(binding, (ast.FunctionDef, ast.AsyncFunctionDef)):
         return _render_callable_declaration(name, binding.args, binding.returns)
     if isinstance(binding, ast.ClassDef):
-        if _parse_class_declaration_signature(contract["signature"]) is not None:
-            bases = [ast.unparse(base) for base in binding.bases]
-            bases.extend(
-                f"{keyword.arg}={ast.unparse(keyword.value)}"
-                for keyword in binding.keywords
-                if keyword.arg is not None
-            )
-            suffix = f"({', '.join(bases)})" if bases else ""
-            return f"class {name}{suffix}"
+        expected_class = _parse_class_declaration_signature(contract["signature"])
+        if expected_class is not None:
+            return _render_actual_class_declaration(binding, expected_class)
         arguments, drop_first = _class_arguments(binding)
         return _render_callable_declaration(
             name,
@@ -265,7 +297,45 @@ def _actual_contract_declaration(
         )
     if isinstance(binding, ast.AnnAssign):
         return f"{name}: {_annotation(binding.annotation)}"
+    if isinstance(binding, ast.Assign):
+        return ast.unparse(binding)
     return f"{name}: unannotated"
+
+
+def _render_actual_class_declaration(
+    actual: ast.ClassDef,
+    expected: ast.ClassDef,
+) -> str:
+    bases = [ast.unparse(base) for base in actual.bases]
+    bases.extend(
+        f"{keyword.arg}={ast.unparse(keyword.value)}"
+        for keyword in actual.keywords
+        if keyword.arg is not None
+    )
+    suffix = f"({', '.join(bases)})" if bases else ""
+    lines = [f"class {actual.name}{suffix}:"]
+    actual_methods = {
+        item.name: item
+        for item in actual.body
+        if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    expected_names = [
+        item.name
+        for item in expected.body
+        if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    for method_name in expected_names:
+        method = actual_methods.get(method_name)
+        if method is None:
+            continue
+        stub = deepcopy(method)
+        stub.decorator_list = []
+        stub.body = [ast.Expr(value=ast.Constant(value=Ellipsis))]
+        ast.fix_missing_locations(stub)
+        lines.extend(f"    {line}" for line in ast.unparse(stub).splitlines())
+    if len(lines) == 1:
+        lines.append("    ...")
+    return "\n".join(lines)
 
 
 def _render_callable_declaration(
@@ -307,12 +377,20 @@ def _class_method_mismatch(
     expected_methods = {
         item.name: item
         for item in expected_class.body
-        if isinstance(item, ast.FunctionDef) and item.name != "__init__"
+        if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and item.name != "__init__"
     }
     for name, expected in expected_methods.items():
         actual = actual_methods.get(name)
         if actual is None:
             return f"class does not define contracted method {name!r}"
+        if isinstance(actual, ast.AsyncFunctionDef) != isinstance(
+            expected, ast.AsyncFunctionDef
+        ):
+            expected_kind = "asynchronous" if isinstance(
+                expected, ast.AsyncFunctionDef
+            ) else "synchronous"
+            return f"method {name!r} must be {expected_kind}"
         if _arguments_key(actual.args) != _arguments_key(expected.args):
             return f"method {name!r} arguments do not match"
         if _annotation(actual.returns) != _annotation(expected.returns):
@@ -361,18 +439,18 @@ def _parse_callable_signature(signature: str) -> ast.FunctionDef | None:
 def _parse_class_declaration_signature(signature: str) -> ast.ClassDef | None:
     normalized = _normalise_signature_markup(signature)
     candidate = re.sub(
-        r":\s*(?=def\s+\w+\s*\()",
+        r":\s*(?=(?:async\s+)?def\s+\w+\s*\()",
         "__CLEAN_CLASS_COLON__\n    ",
         normalized.strip(),
         count=1,
     )
     candidate = re.sub(
-        r":\s*(?=def\s+\w+\s*\()",
+        r":\s*(?=(?:async\s+)?def\s+\w+\s*\()",
         ":\n        ...\n    ",
         candidate,
     )
     candidate = re.sub(
-        r"\.\.\.\s+(?=def\s+\w+\s*\()",
+        r"\.\.\.\s+(?=(?:async\s+)?def\s+\w+\s*\()",
         "...\n    ",
         candidate,
     )
@@ -386,7 +464,11 @@ def _parse_class_declaration_signature(signature: str) -> ast.ClassDef | None:
         return None
     if len(node.body) == 1 and _is_class_placeholder(node.body[0]):
         return node
-    methods = [item for item in node.body if isinstance(item, ast.FunctionDef)]
+    methods = [
+        item
+        for item in node.body
+        if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
     if len(methods) != len(node.body):
         return None
     if len({method.name for method in methods}) != len(methods):
@@ -394,15 +476,25 @@ def _parse_class_declaration_signature(signature: str) -> ast.ClassDef | None:
     return node if all(_is_stub_body(method.body) for method in methods) else None
 
 
-def _parse_constant_signature(signature: str) -> ast.AnnAssign | None:
+def _parse_constant_signature(signature: str) -> ast.Assign | ast.AnnAssign | None:
     try:
         tree = ast.parse(_normalise_signature_markup(signature))
     except SyntaxError:
         return None
     node = tree.body[0] if len(tree.body) == 1 else None
-    if not isinstance(node, ast.AnnAssign) or not isinstance(node.target, ast.Name):
-        return None
-    return node
+    return node if _constant_name(node) is not None else None
+
+
+def _constant_name(node: ast.AST | None) -> str | None:
+    if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+        return node.target.id
+    if (
+        isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Name)
+    ):
+        return node.targets[0].id
+    return None
 
 
 def _class_bases_key(node: ast.ClassDef) -> tuple[Any, ...]:

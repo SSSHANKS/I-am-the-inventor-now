@@ -221,6 +221,31 @@ def test_clean_architecture_normalisation_recovers_unique_capability_requirement
     validate_architecture(result, SPECIFICATION)
 
 
+def test_clean_architecture_normalisation_recovers_contract_owner_requirements():
+    architecture = _architecture()
+    architecture["components"][0]["requirement_ids"].remove("EH-001")
+    architecture["capabilities"][0]["requirement_ids"].remove("EH-001")
+
+    result = normalise_architecture(architecture)
+
+    assert result["components"][0]["requirement_ids"] == ["FR-001", "EH-001"]
+    assert result["capabilities"][0]["requirement_ids"] == ["FR-001", "EH-001"]
+    assert architecture["components"][0]["requirement_ids"] == ["FR-001"]
+    validate_architecture(result, SPECIFICATION)
+
+
+def test_clean_architecture_normalisation_recovers_single_component_capability_ownership():
+    architecture = _architecture()
+    architecture["components"][0]["requirement_ids"].remove("EH-001")
+    architecture["contracts"][0]["requirement_ids"].remove("EH-001")
+
+    result = normalise_architecture(architecture)
+
+    assert result["components"][0]["requirement_ids"] == ["FR-001", "EH-001"]
+    assert architecture["components"][0]["requirement_ids"] == ["FR-001"]
+    validate_architecture(result, SPECIFICATION)
+
+
 def test_clean_architecture_normalisation_aligns_contract_declaration_name():
     architecture = _architecture()
     architecture["contracts"][0]["declaration"] = "wrong(name: str) -> str"
@@ -229,6 +254,38 @@ def test_clean_architecture_normalisation_aligns_contract_declaration_name():
 
     assert result["contracts"][0]["declaration"] == "greet(name: str) -> str"
     assert architecture["contracts"][0]["declaration"] == "wrong(name: str) -> str"
+    validate_architecture(result, SPECIFICATION)
+
+
+def test_clean_architecture_normalisation_uses_package_import_name():
+    architecture = _architecture()
+    architecture["contracts"][0]["qualified_name"] = "greeting.__init__.greet"
+
+    result = normalise_architecture(architecture)
+
+    assert result["contracts"][0]["qualified_name"] == "greeting.greet"
+    assert (
+        architecture["contracts"][0]["qualified_name"]
+        == "greeting.__init__.greet"
+    )
+    validate_architecture(result, SPECIFICATION)
+
+
+def test_clean_architecture_normalisation_recovers_assignment_contract_kind():
+    architecture = _architecture()
+    architecture["contracts"][0].update(
+        {
+            "qualified_name": "greeting.__all__",
+            "kind": "function",
+            "declaration": "exports = ['greet']",
+        }
+    )
+
+    result = normalise_architecture(architecture)
+
+    assert result["contracts"][0]["kind"] == "constant"
+    assert result["contracts"][0]["declaration"] == "__all__ = ['greet']"
+    assert architecture["contracts"][0]["kind"] == "function"
     validate_architecture(result, SPECIFICATION)
 
 
@@ -308,6 +365,56 @@ def test_clean_architecture_normalisation_splits_cross_module_entry_point():
             "contract_ids": ["SYM-002"],
         },
     ]
+    validate_architecture(result, SPECIFICATION)
+
+
+def test_clean_architecture_keeps_class_members_with_their_provider_module():
+    architecture = _architecture()
+    architecture["contracts"][0].update(
+        {
+            "qualified_name": "greeting.Greeter",
+            "kind": "class",
+            "declaration": "Greeter()",
+        }
+    )
+    architecture["contracts"].append(
+        {
+            "contract_id": "SYM-002",
+            "component_id": "CMP-001",
+            "qualified_name": "greeting.Greeter.greet",
+            "kind": "function",
+            "declaration": "greet(self, name: str) -> str",
+            "visibility": "public",
+            "requirement_ids": ["FR-001"],
+        }
+    )
+    architecture["entry_points"][0]["contract_ids"].append("SYM-002")
+
+    result = normalise_architecture(architecture)
+
+    assert len(result["entry_points"]) == 1
+    assert result["entry_points"][0]["contract_ids"] == ["SYM-001", "SYM-002"]
+    validate_architecture(result, SPECIFICATION)
+
+
+def test_clean_architecture_normalisation_aligns_entry_point_with_contract_owner():
+    architecture = _architecture()
+    architecture["components"].append(
+        {
+            "component_id": "CMP-002",
+            "purpose": "Own the public greeting contract.",
+            "kind": "interface",
+            "requirement_ids": ["FR-001", "EH-001"],
+            "depends_on": ["CMP-001"],
+        }
+    )
+    architecture["capabilities"][0]["component_ids"].append("CMP-002")
+    architecture["contracts"][0]["component_id"] = "CMP-002"
+
+    result = normalise_architecture(architecture)
+
+    assert result["entry_points"][0]["component_id"] == "CMP-002"
+    assert architecture["entry_points"][0]["component_id"] == "CMP-001"
     validate_architecture(result, SPECIFICATION)
 
 

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import ast
 import re
 from copy import deepcopy
 from typing import Any
 
+from packages.modules.clean.python_contract_paths import python_contract_module
 from packages.modules.clean.requirements import requirement_statements
 
 
@@ -14,16 +16,22 @@ class CleanArchitectureError(ValueError):
 def normalise_architecture(architecture: dict[str, Any]) -> dict[str, Any]:
     """Recover uniquely implied allocation and merge forced Python module owners."""
     normalised = deepcopy(architecture)
+    _recover_contract_component_requirements(normalised)
+    _recover_single_component_capability_requirements(normalised)
     _recover_unique_capability_requirements(normalised)
+    _align_entry_point_component_owners(normalised)
     if "python" not in str(normalised["project_profile"]["language"]).casefold():
         return normalised
+    _normalise_python_package_surface_names(normalised)
+    _normalise_python_contract_kinds(normalised)
     _align_python_contract_declaration_names(normalised)
     _split_python_entry_points_by_module(normalised)
+    _align_entry_point_component_owners(normalised)
 
     owners_by_module: dict[str, set[str]] = {}
     for contract in normalised["contracts"]:
-        module, separator, _ = str(contract["qualified_name"]).rpartition(".")
-        if separator:
+        module = python_contract_module(contract, normalised["contracts"])
+        if module:
             owners_by_module.setdefault(module, set()).add(contract["component_id"])
     parent = {item["component_id"]: item["component_id"] for item in normalised["components"]}
 
@@ -87,6 +95,79 @@ def normalise_architecture(architecture: dict[str, Any]) -> dict[str, Any]:
     return normalised
 
 
+def _normalise_python_package_surface_names(
+    architecture: dict[str, Any],
+) -> None:
+    """Use Python's import name for contracts provided by package ``__init__``."""
+    for contract in architecture["contracts"]:
+        qualified_name = str(contract["qualified_name"])
+        module, separator, symbol = qualified_name.rpartition(".")
+        if not separator or not module.endswith(".__init__"):
+            continue
+        package = module.removesuffix(".__init__")
+        if package:
+            contract["qualified_name"] = f"{package}.{symbol}"
+
+
+def _normalise_python_contract_kinds(architecture: dict[str, Any]) -> None:
+    """Recover constant kinds from unambiguous assignment declarations."""
+    for contract in architecture["contracts"]:
+        if _python_constant_declaration(str(contract["declaration"])) is not None:
+            contract["kind"] = "constant"
+
+
+def _python_constant_declaration(declaration: str) -> ast.Assign | ast.AnnAssign | None:
+    try:
+        tree = ast.parse(declaration)
+    except SyntaxError:
+        return None
+    node = tree.body[0] if len(tree.body) == 1 else None
+    if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+        return node
+    if (
+        isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Name)
+    ):
+        return node
+    return None
+
+
+def _recover_contract_component_requirements(architecture: dict[str, Any]) -> None:
+    """Make a contract's declared owner own the requirements the contract implements."""
+    components = {
+        item["component_id"]: item for item in architecture["components"]
+    }
+    for contract in architecture["contracts"]:
+        component = components.get(contract["component_id"])
+        if component is None:
+            continue
+        component["requirement_ids"] = list(
+            dict.fromkeys(
+                [*component["requirement_ids"], *contract["requirement_ids"]]
+            )
+        )
+
+
+def _recover_single_component_capability_requirements(
+    architecture: dict[str, Any],
+) -> None:
+    """Give a sole responsible component the requirements its capability declares."""
+    components = {
+        item["component_id"]: item for item in architecture["components"]
+    }
+    for capability in architecture["capabilities"]:
+        component_ids = list(dict.fromkeys(capability["component_ids"]))
+        if len(component_ids) != 1 or component_ids[0] not in components:
+            continue
+        component = components[component_ids[0]]
+        component["requirement_ids"] = list(
+            dict.fromkeys(
+                [*component["requirement_ids"], *capability["requirement_ids"]]
+            )
+        )
+
+
 def _recover_unique_capability_requirements(architecture: dict[str, Any]) -> None:
     """Allocate an omitted behavior only when component ownership makes it unique."""
     components = {
@@ -112,11 +193,35 @@ def _recover_unique_capability_requirements(architecture: dict[str, Any]) -> Non
             candidates[0]["requirement_ids"].append(requirement_id)
 
 
+def _align_entry_point_component_owners(architecture: dict[str, Any]) -> None:
+    """Use a shared contract owner when an entry point's ownership is unambiguous."""
+    contract_owners = {
+        item["contract_id"]: item["component_id"]
+        for item in architecture["contracts"]
+    }
+    for entry_point in architecture["entry_points"]:
+        owners = {
+            contract_owners[contract_id]
+            for contract_id in entry_point["contract_ids"]
+            if contract_id in contract_owners
+        }
+        if len(owners) == 1:
+            entry_point["component_id"] = owners.pop()
+
+
 def _align_python_contract_declaration_names(architecture: dict[str, Any]) -> None:
     """Align redundant declaration names with authoritative qualified names."""
     for contract in architecture["contracts"]:
         expected = str(contract["qualified_name"]).rsplit(".", 1)[-1]
         declaration = str(contract["declaration"])
+        if _python_constant_declaration(declaration) is not None:
+            contract["declaration"] = re.sub(
+                r"^(\s*)[A-Za-z_][A-Za-z0-9_]*",
+                rf"\g<1>{expected}",
+                declaration,
+                count=1,
+            )
+            continue
         if declaration.lstrip().startswith("class "):
             aligned = re.sub(
                 r"^(\s*class\s+)[A-Za-z_][A-Za-z0-9_]*",
@@ -154,7 +259,7 @@ def _align_python_contract_declaration_names(architecture: dict[str, Any]) -> No
 def _split_python_entry_points_by_module(architecture: dict[str, Any]) -> None:
     """Ensure every Python entry-point binding can resolve to one provider file."""
     contracts = {
-        item["contract_id"]: str(item["qualified_name"]).rsplit(".", 1)[0]
+        item["contract_id"]: python_contract_module(item, architecture["contracts"])
         for item in architecture["contracts"]
     }
     used_ids = {item["entry_point_id"] for item in architecture["entry_points"]}
@@ -221,9 +326,8 @@ def validate_architecture(
     if "python" in str(profile["language"]).casefold():
         module_components: dict[str, set[str]] = {}
         for contract in contracts.values():
-            qualified_name = str(contract["qualified_name"])
-            module, separator, _ = qualified_name.rpartition(".")
-            if separator:
+            module = python_contract_module(contract, contracts.values())
+            if module:
                 module_components.setdefault(module, set()).add(contract["component_id"])
         split_modules = {
             module: owners

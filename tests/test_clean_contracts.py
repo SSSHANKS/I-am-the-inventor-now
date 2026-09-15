@@ -44,6 +44,37 @@ def test_python_contracts_accept_exact_function_signature(tmp_path):
     assert check["status"] == "pass"
 
 
+def test_python_contracts_accept_method_nested_under_declared_class(tmp_path):
+    plan = _plan(
+        "connect(self, receiver: object) -> None",
+        qualified_name="sample.Emitter.connect",
+    )
+    plan["symbol_contracts"].insert(
+        0,
+        {
+            "symbol_id": "SYM-002",
+            "qualified_name": "sample.Emitter",
+            "kind": "class",
+            "signature": "Emitter()",
+            "visibility": "public",
+            "requirement_ids": ["FR-001"],
+        },
+    )
+    plan["files"][0]["provides"].append("SYM-002")
+
+    check = _check(
+        tmp_path,
+        (
+            "class Emitter:\n"
+            "    def connect(self, receiver: object) -> None:\n"
+            "        pass\n"
+        ),
+        plan,
+    )
+
+    assert check["status"] == "pass"
+
+
 def test_python_contracts_accept_equivalent_typing_import_spelling(tmp_path):
     plan = _plan(
         "run(stream: typing.BinaryIO, value: typing.Optional[str] = None) "
@@ -346,6 +377,57 @@ def test_python_contracts_reject_class_protocol_method_drift(tmp_path):
 
     assert check["status"] == "fail"
     assert "method 'run' arguments do not match" in check["message"]
+    assert "def run(self, value: bytes) -> bool" in check["diagnostics"][0]["actual"]
+
+
+def test_python_contracts_accept_rich_class_with_async_method(tmp_path):
+    plan = _plan(
+        (
+            "class Emitter:\n"
+            "    def __init__(self, name: str | None = None) -> None: ...\n"
+            "    def emit(self, sender: object = ..., *args: object, "
+            "**kwargs: object) -> list[tuple[callable, object]]: ...\n"
+            "    async def emit_async(self, sender: object = ..., *args: object, "
+            "**kwargs: object) -> list[tuple[callable, object]]: ..."
+        ),
+        kind="class",
+        qualified_name="sample.Emitter",
+    )
+
+    check = _check(
+        tmp_path,
+        (
+            "class Emitter:\n"
+            "    def __init__(self, name: str | None = None) -> None:\n"
+            "        self.name = name\n"
+            "    def emit(self, sender: object = ..., *args: object, "
+            "**kwargs: object) -> list[tuple[callable, object]]:\n"
+            "        return []\n"
+            "    async def emit_async(self, sender: object = ..., *args: object, "
+            "**kwargs: object) -> list[tuple[callable, object]]:\n"
+            "        return []\n"
+        ),
+        plan,
+    )
+
+    assert check["status"] == "pass"
+
+
+def test_python_contracts_reject_sync_implementation_of_async_method(tmp_path):
+    plan = _plan(
+        "class Service:\n    async def run(self) -> bool: ...",
+        kind="class",
+        qualified_name="sample.Service",
+    )
+
+    check = _check(
+        tmp_path,
+        "class Service:\n    def run(self) -> bool:\n        return True\n",
+        plan,
+    )
+
+    assert check["status"] == "fail"
+    assert "method 'run' must be asynchronous" in check["message"]
 
 
 def test_python_contracts_accept_single_line_multi_method_class_declaration(tmp_path):
@@ -429,3 +511,19 @@ def test_python_contracts_validate_constant_annotation(tmp_path):
     mismatch = _check(tmp_path / "mismatch", "LIMIT: str = '10'\n", plan)
     assert mismatch["status"] == "fail"
     assert "annotation does not match" in mismatch["message"]
+
+
+def test_python_contracts_validate_unannotated_constant_assignment(tmp_path):
+    plan = _plan(
+        "__all__ = ['Emitter', 'Namespace']",
+        kind="constant",
+        qualified_name="sample.__all__",
+    )
+
+    assert (
+        _check(tmp_path, "__all__ = ['Emitter', 'Namespace']\n", plan)["status"]
+        == "pass"
+    )
+    mismatch = _check(tmp_path / "mismatch", "__all__ = ['Emitter']\n", plan)
+    assert mismatch["status"] == "fail"
+    assert "value does not match contracted assignment" in mismatch["message"]

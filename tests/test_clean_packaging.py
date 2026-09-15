@@ -230,6 +230,25 @@ def test_python_packaging_requires_top_level_src_modules_in_wheel_metadata(tmp_p
     assert "py-modules omits top-level src modules: sample" in check["message"]
 
 
+def test_python_manifest_rejects_module_and_package_with_same_import_name():
+    architecture = _architecture()
+    manifest = _manifest()
+    manifest["files"].append(
+        {
+            "path": "src/sample/api/__init__.py",
+            "category": "source",
+            "component_id": "CMP-001",
+            "provides": [],
+        }
+    )
+
+    issues = python_manifest_readiness_issues(architecture, manifest)
+
+    assert any(
+        "module 'sample.api' has multiple source paths" in issue for issue in issues
+    )
+
+
 def test_python_packaging_reports_packages_array_without_crashing(tmp_path):
     malformed = _pyproject().replace(
         '[tool.setuptools.packages.find]\nwhere = ["src"]',
