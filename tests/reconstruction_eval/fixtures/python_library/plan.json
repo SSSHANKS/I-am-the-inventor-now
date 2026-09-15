@@ -1,0 +1,49 @@
+{
+  "schema_version": 2,
+  "summary": "A dependency-free ratio library.",
+  "project_kind": "library",
+  "runtime": {"language": "Python", "minimum_version": "3.12"},
+  "dependencies": [],
+  "packages": [],
+  "entry_points": [{"path": "ratio.py", "description": "Public ratio module"}],
+  "symbol_contracts": [
+    {
+      "symbol_id": "SYM-001",
+      "qualified_name": "ratio.RatioError",
+      "kind": "exception",
+      "signature": "class RatioError(ValueError): ...",
+      "visibility": "public",
+      "requirement_ids": ["EH-001"]
+    },
+    {
+      "symbol_id": "SYM-002",
+      "qualified_name": "ratio.divide",
+      "kind": "function",
+      "signature": "divide(dividend: int, divisor: int) -> float",
+      "visibility": "public",
+      "requirement_ids": ["FR-001", "AC-001"]
+    }
+  ],
+  "files": [
+    {
+      "path": "ratio.py",
+      "purpose": "Implement ratio behavior and its public error.",
+      "requirement_ids": ["FR-001", "EH-001", "AC-001"],
+      "provides": ["SYM-001", "SYM-002"],
+      "requires": [],
+      "depends_on": [],
+      "generation_order": 1
+    },
+    {
+      "path": "tests/test_ratio.py",
+      "purpose": "Verify the approved ratio scenarios.",
+      "requirement_ids": ["FR-001", "EH-001", "AC-001", "TC-001"],
+      "provides": [],
+      "requires": ["SYM-001", "SYM-002"],
+      "depends_on": ["ratio.py"],
+      "generation_order": 2
+    }
+  ],
+  "validation_strategy": ["Import the ratio module and run pytest."],
+  "open_questions": []
+}

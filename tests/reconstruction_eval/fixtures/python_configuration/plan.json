@@ -1,0 +1,49 @@
+{
+  "schema_version": 2,
+  "summary": "A JSON settings parser with validation and defaults.",
+  "project_kind": "library",
+  "runtime": {"language": "Python", "minimum_version": "3.12"},
+  "dependencies": [],
+  "packages": [],
+  "entry_points": [{"path": "settings_reader.py", "description": "Settings parser module"}],
+  "symbol_contracts": [
+    {
+      "symbol_id": "SYM-001",
+      "qualified_name": "settings_reader.InvalidSettings",
+      "kind": "exception",
+      "signature": "class InvalidSettings(ValueError): ...",
+      "visibility": "public",
+      "requirement_ids": ["EH-001"]
+    },
+    {
+      "symbol_id": "SYM-002",
+      "qualified_name": "settings_reader.parse_settings",
+      "kind": "function",
+      "signature": "parse_settings(text: str) -> dict",
+      "visibility": "public",
+      "requirement_ids": ["FR-001", "BR-001", "AC-001"]
+    }
+  ],
+  "files": [
+    {
+      "path": "settings_reader.py",
+      "purpose": "Parse and validate serialized settings.",
+      "requirement_ids": ["FR-001", "BR-001", "EH-001", "AC-001"],
+      "provides": ["SYM-001", "SYM-002"],
+      "requires": [],
+      "depends_on": [],
+      "generation_order": 1
+    },
+    {
+      "path": "tests/test_settings_reader.py",
+      "purpose": "Verify serialized settings behavior.",
+      "requirement_ids": ["FR-001", "BR-001", "EH-001", "AC-001", "TC-001"],
+      "provides": [],
+      "requires": ["SYM-001", "SYM-002"],
+      "depends_on": ["settings_reader.py"],
+      "generation_order": 2
+    }
+  ],
+  "validation_strategy": ["Import the settings module and run pytest."],
+  "open_questions": []
+}

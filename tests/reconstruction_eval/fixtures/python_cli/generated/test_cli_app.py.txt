@@ -1,0 +1,12 @@
+import pytest
+
+from cli_app import render_greeting
+
+
+def test_render_repeated_greeting() -> None:
+    assert render_greeting("Ada", 2) == "Hello Ada!\nHello Ada!"
+
+
+def test_reject_nonpositive_count() -> None:
+    with pytest.raises(ValueError):
+        render_greeting("Ada", 0)

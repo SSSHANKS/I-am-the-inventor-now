@@ -1,0 +1,41 @@
+{
+  "schema_version": 2,
+  "summary": "A transactional text-file resource.",
+  "project_kind": "library",
+  "runtime": {"language": "Python", "minimum_version": "3.12"},
+  "dependencies": [],
+  "packages": [],
+  "entry_points": [{"path": "transactional_file.py", "description": "Transactional resource module"}],
+  "symbol_contracts": [
+    {
+      "symbol_id": "SYM-001",
+      "qualified_name": "transactional_file.TransactionalTextFile",
+      "kind": "class",
+      "signature": "class TransactionalTextFile:\n    def __init__(self, target: str) -> None:\n        ...\n    def __enter__(self) -> object:\n        ...\n    def write(self, text: str) -> None:\n        ...\n    def __exit__(self, exc_type: object | None, exc_value: object | None, traceback: object | None) -> bool:\n        ...",
+      "visibility": "public",
+      "requirement_ids": ["FR-001", "BR-001", "EH-001", "AC-001"]
+    }
+  ],
+  "files": [
+    {
+      "path": "transactional_file.py",
+      "purpose": "Implement transactional commit and rollback behavior.",
+      "requirement_ids": ["FR-001", "BR-001", "EH-001", "AC-001"],
+      "provides": ["SYM-001"],
+      "requires": [],
+      "depends_on": [],
+      "generation_order": 1
+    },
+    {
+      "path": "tests/test_transactional_file.py",
+      "purpose": "Verify commit and rollback behavior.",
+      "requirement_ids": ["FR-001", "BR-001", "EH-001", "AC-001", "TC-001"],
+      "provides": [],
+      "requires": ["SYM-001"],
+      "depends_on": ["transactional_file.py"],
+      "generation_order": 2
+    }
+  ],
+  "validation_strategy": ["Import the resource module and run pytest."],
+  "open_questions": []
+}

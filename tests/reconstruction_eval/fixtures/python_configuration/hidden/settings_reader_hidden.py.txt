@@ -1,0 +1,18 @@
+import pytest
+
+from settings_reader import InvalidSettings, parse_settings
+
+
+def test_explicit_retry_count() -> None:
+    serialized = '{"name": "worker", "retries": 0}'
+    assert parse_settings(serialized) == {"name": "worker", "retries": 0}
+
+
+def test_non_object_input_is_rejected() -> None:
+    with pytest.raises(InvalidSettings):
+        parse_settings('[{"name": "worker"}]')
+
+
+def test_boolean_retry_count_is_rejected() -> None:
+    with pytest.raises(InvalidSettings):
+        parse_settings('{"name": "worker", "retries": true}')

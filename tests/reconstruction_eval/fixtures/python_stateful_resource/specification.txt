@@ -1,0 +1,21 @@
+# Transactional Text Resource
+
+## Functional Requirements
+
+- FR-001: Commit written text to the target when a managed operation succeeds.
+
+## Behavioral Requirements
+
+- BR-001: Preserve the prior target and discard temporary content when the operation fails.
+
+## Error Handling
+
+- EH-001: Cleanup is idempotent and does not leak the temporary resource.
+
+## Acceptance Criteria
+
+- AC-001: Successful completion atomically replaces the target with the new text.
+
+## Test Candidates
+
+- TC-001: Verify commit, rollback, and repeated cleanup behavior.

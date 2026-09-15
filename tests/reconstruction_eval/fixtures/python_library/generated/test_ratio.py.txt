@@ -1,0 +1,12 @@
+import pytest
+
+from ratio import RatioError, divide
+
+
+def test_divide() -> None:
+    assert divide(6, 3) == 2.0
+
+
+def test_zero_divisor() -> None:
+    with pytest.raises(RatioError):
+        divide(1, 0)

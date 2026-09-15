@@ -1,0 +1,12 @@
+import pytest
+
+from settings_reader import InvalidSettings, parse_settings
+
+
+def test_default_retry_count() -> None:
+    assert parse_settings('{"name": "worker"}') == {"name": "worker", "retries": 3}
+
+
+def test_invalid_json() -> None:
+    with pytest.raises(InvalidSettings):
+        parse_settings("not-json")

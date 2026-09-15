@@ -1,0 +1,21 @@
+# Settings Reader
+
+## Functional Requirements
+
+- FR-001: Parse a JSON object containing a required non-empty name and optional retry count.
+
+## Behavioral Requirements
+
+- BR-001: Use a retry count of three when the input omits it.
+
+## Error Handling
+
+- EH-001: Reject malformed JSON, non-object input, invalid names, and negative retry counts.
+
+## Acceptance Criteria
+
+- AC-001: Valid serialized settings produce a normalized dictionary.
+
+## Test Candidates
+
+- TC-001: Parse serialized valid and invalid settings rather than preconstructed dictionaries.

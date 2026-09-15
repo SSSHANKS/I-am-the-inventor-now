@@ -1,0 +1,8 @@
+class RatioError(ValueError):
+    pass
+
+
+def divide(dividend: int, divisor: int) -> float:
+    if divisor == 0:
+        raise RatioError("divisor cannot be zero")
+    return dividend / divisor

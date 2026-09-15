@@ -1,0 +1,22 @@
+from __future__ import annotations
+
+import argparse
+
+
+def render_greeting(name: str, count: int = 1) -> str:
+    if count < 1:
+        raise ValueError("count must be positive")
+    return "\n".join(f"Hello {name}!" for _ in range(count))
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("name")
+    parser.add_argument("--count", type=int, default=1)
+    arguments = parser.parse_args(argv)
+    print(render_greeting(arguments.name, arguments.count))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

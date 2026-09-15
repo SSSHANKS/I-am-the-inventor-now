@@ -1,0 +1,31 @@
+{
+  "schema_version": 2,
+  "name": "python-configuration",
+  "archetype": "configuration",
+  "compatibility_mode": "renamed",
+  "specification_file": "specification.txt",
+  "plan_file": "plan.json",
+  "generated_files": {
+    "settings_reader.py": "generated/settings_reader.py.txt",
+    "tests/test_settings_reader.py": "generated/test_settings_reader.py.txt"
+  },
+  "hidden_tests": [
+    "hidden/settings_reader_hidden.py.txt"
+  ],
+  "seeded_faults": [
+    {
+      "fault_id": "FAULT-001",
+      "target_path": "settings_reader.py",
+      "replacement_file": "faults/accept_boolean_retries.py.txt",
+      "expect_generated_detection": false,
+      "expect_hidden_detection": true
+    }
+  ],
+  "expected": {
+    "status": "success",
+    "validation_level": "executable",
+    "requirement_ids": ["AC-001", "BR-001", "EH-001", "FR-001", "TC-001"],
+    "minimum_generated_tests": 1,
+    "minimum_hidden_tests": 3
+  }
+}

@@ -1,0 +1,21 @@
+import json
+
+
+class InvalidSettings(ValueError):
+    pass
+
+
+def parse_settings(text: str) -> dict:
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise InvalidSettings("settings must be valid JSON") from exc
+    if not isinstance(value, dict):
+        raise InvalidSettings("settings must be an object")
+    name = value.get("name")
+    retries = value.get("retries", 3)
+    if not isinstance(name, str) or not name.strip():
+        raise InvalidSettings("name must be non-empty text")
+    if not isinstance(retries, int) or isinstance(retries, bool) or retries < 0:
+        raise InvalidSettings("retries must be a non-negative integer")
+    return {"name": name, "retries": retries}

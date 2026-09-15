@@ -1,0 +1,17 @@
+import pytest
+
+from ratio import RatioError, divide
+
+
+def test_negative_ratio() -> None:
+    assert divide(-9, 3) == -3.0
+
+
+def test_fractional_ratio() -> None:
+    assert divide(1, 4) == 0.25
+
+
+def test_public_error_is_a_value_error() -> None:
+    with pytest.raises(ValueError):
+        divide(8, 0)
+    assert issubclass(RatioError, ValueError)

@@ -1,0 +1,41 @@
+{
+  "schema_version": 2,
+  "summary": "A dependency-free greeting command.",
+  "project_kind": "application",
+  "runtime": {"language": "Python", "minimum_version": "3.12"},
+  "dependencies": [],
+  "packages": [],
+  "entry_points": [{"path": "cli_app.py", "description": "Executable greeting command"}],
+  "symbol_contracts": [
+    {
+      "symbol_id": "SYM-001",
+      "qualified_name": "cli_app.render_greeting",
+      "kind": "function",
+      "signature": "render_greeting(name: str, count: int = 1) -> str",
+      "visibility": "public",
+      "requirement_ids": ["FR-001", "BR-001", "AC-001"]
+    }
+  ],
+  "files": [
+    {
+      "path": "cli_app.py",
+      "purpose": "Implement greeting rendering and command execution.",
+      "requirement_ids": ["FR-001", "BR-001", "AC-001"],
+      "provides": ["SYM-001"],
+      "requires": [],
+      "depends_on": [],
+      "generation_order": 1
+    },
+    {
+      "path": "tests/test_cli_app.py",
+      "purpose": "Verify greeting rendering and repetition.",
+      "requirement_ids": ["FR-001", "BR-001", "AC-001", "TC-001"],
+      "provides": [],
+      "requires": ["SYM-001"],
+      "depends_on": ["cli_app.py"],
+      "generation_order": 2
+    }
+  ],
+  "validation_strategy": ["Import the command module and run pytest."],
+  "open_questions": []
+}

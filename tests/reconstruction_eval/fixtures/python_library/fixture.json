@@ -1,0 +1,23 @@
+{
+  "schema_version": 2,
+  "name": "python-library",
+  "archetype": "library",
+  "compatibility_mode": "renamed",
+  "specification_file": "specification.txt",
+  "plan_file": "plan.json",
+  "generated_files": {
+    "ratio.py": "generated/ratio.py.txt",
+    "tests/test_ratio.py": "generated/test_ratio.py.txt"
+  },
+  "hidden_tests": [
+    "hidden/ratio_hidden.py.txt"
+  ],
+  "seeded_faults": [],
+  "expected": {
+    "status": "success",
+    "validation_level": "executable",
+    "requirement_ids": ["AC-001", "EH-001", "FR-001", "TC-001"],
+    "minimum_generated_tests": 1,
+    "minimum_hidden_tests": 3
+  }
+}

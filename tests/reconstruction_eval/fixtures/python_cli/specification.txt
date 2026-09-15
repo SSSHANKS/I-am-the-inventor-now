@@ -1,0 +1,17 @@
+# Greeting Command
+
+## Functional Requirements
+
+- FR-001: Provide a command that accepts a name and writes a greeting.
+
+## Behavioral Requirements
+
+- BR-001: A positive repeat option writes the greeting exactly that many times.
+
+## Acceptance Criteria
+
+- AC-001: Invoking the command for Ada with repeat two succeeds and writes two lines.
+
+## Test Candidates
+
+- TC-001: Execute the command as a child process and inspect its exit code and output.

@@ -1,0 +1,23 @@
+{
+  "schema_version": 2,
+  "name": "python-cli",
+  "archetype": "cli",
+  "compatibility_mode": "renamed",
+  "specification_file": "specification.txt",
+  "plan_file": "plan.json",
+  "generated_files": {
+    "cli_app.py": "generated/cli_app.py.txt",
+    "tests/test_cli_app.py": "generated/test_cli_app.py.txt"
+  },
+  "hidden_tests": [
+    "hidden/cli_hidden.py.txt"
+  ],
+  "seeded_faults": [],
+  "expected": {
+    "status": "success",
+    "validation_level": "executable",
+    "requirement_ids": ["AC-001", "BR-001", "FR-001", "TC-001"],
+    "minimum_generated_tests": 1,
+    "minimum_hidden_tests": 2
+  }
+}

@@ -1,0 +1,28 @@
+import pytest
+
+from transactional_file import TransactionalTextFile
+
+
+def test_rollback_removes_temporary_resource(tmp_path) -> None:
+    target = tmp_path / "value.txt"
+    target.write_text("stable", encoding="utf-8")
+    resource = TransactionalTextFile(str(target))
+    with pytest.raises(LookupError):
+        with resource as active:
+            active.write("discard")
+            raise LookupError("abort")
+    assert target.read_text(encoding="utf-8") == "stable"
+    assert not resource.temporary.exists()
+
+
+def test_context_does_not_suppress_failure(tmp_path) -> None:
+    target = tmp_path / "value.txt"
+    with pytest.raises(RuntimeError, match="visible"):
+        with TransactionalTextFile(str(target)):
+            raise RuntimeError("visible")
+
+
+def test_write_requires_active_context(tmp_path) -> None:
+    resource = TransactionalTextFile(str(tmp_path / "value.txt"))
+    with pytest.raises(RuntimeError, match="not active"):
+        resource.write("invalid")

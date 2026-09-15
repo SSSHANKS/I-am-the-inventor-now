@@ -1,0 +1,17 @@
+# Ratio Library
+
+## Functional Requirements
+
+- FR-001: Divide one integer by another and return a floating-point ratio.
+
+## Error Handling
+
+- EH-001: Reject a zero divisor with the library's public ratio error.
+
+## Acceptance Criteria
+
+- AC-001: Dividing six by three returns two.
+
+## Test Candidates
+
+- TC-001: Verify positive, negative, and zero-divisor behavior.

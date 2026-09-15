@@ -1,0 +1,21 @@
+from transactional_file import TransactionalTextFile
+
+
+def test_successful_commit(tmp_path) -> None:
+    target = tmp_path / "value.txt"
+    target.write_text("old", encoding="utf-8")
+    with TransactionalTextFile(str(target)) as resource:
+        resource.write("new")
+    assert target.read_text(encoding="utf-8") == "new"
+
+
+def test_failed_operation_rolls_back(tmp_path) -> None:
+    target = tmp_path / "value.txt"
+    target.write_text("old", encoding="utf-8")
+    try:
+        with TransactionalTextFile(str(target)) as resource:
+            resource.write("new")
+            raise RuntimeError("abort")
+    except RuntimeError:
+        pass
+    assert target.read_text(encoding="utf-8") == "old"

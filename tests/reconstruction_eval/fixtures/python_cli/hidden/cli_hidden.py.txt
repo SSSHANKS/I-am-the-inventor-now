@@ -1,0 +1,29 @@
+from __future__ import annotations
+
+import subprocess
+import sys
+
+
+def test_command_executes_with_repetition() -> None:
+    completed = subprocess.run(
+        [sys.executable, "cli_app.py", "--count", "2", "Ada"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    assert completed.returncode == 0
+    assert completed.stdout.splitlines() == ["Hello Ada!", "Hello Ada!"]
+    assert completed.stderr == ""
+
+
+def test_command_default_count() -> None:
+    completed = subprocess.run(
+        [sys.executable, "cli_app.py", "Lin"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    assert completed.returncode == 0
+    assert completed.stdout == "Hello Lin!\n"

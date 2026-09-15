@@ -1,0 +1,33 @@
+from __future__ import annotations
+
+import os
+from pathlib import Path
+from typing import TextIO
+
+
+class TransactionalTextFile:
+    def __init__(self, target: str) -> None:
+        self.target = Path(target)
+        self.temporary = self.target.with_name(f".{self.target.name}.pending")
+        self._handle: TextIO | None = None
+
+    def __enter__(self) -> object:
+        self._handle = self.temporary.open("w", encoding="utf-8")
+        return self
+
+    def write(self, text: str) -> None:
+        if self._handle is None or self._handle.closed:
+            raise RuntimeError("resource is not active")
+        self._handle.write(text)
+
+    def __exit__(
+        self,
+        exc_type: object | None,
+        exc_value: object | None,
+        traceback: object | None,
+    ) -> bool:
+        if self._handle is not None and not self._handle.closed:
+            self._handle.close()
+        if exc_type is None:
+            os.replace(self.temporary, self.target)
+        return False

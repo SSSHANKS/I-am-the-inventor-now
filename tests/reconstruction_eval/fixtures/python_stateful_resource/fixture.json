@@ -1,0 +1,31 @@
+{
+  "schema_version": 2,
+  "name": "python-stateful-resource",
+  "archetype": "stateful-resource",
+  "compatibility_mode": "renamed",
+  "specification_file": "specification.txt",
+  "plan_file": "plan.json",
+  "generated_files": {
+    "transactional_file.py": "generated/transactional_file.py.txt",
+    "tests/test_transactional_file.py": "generated/test_transactional_file.py.txt"
+  },
+  "hidden_tests": [
+    "hidden/transactional_file_hidden.py.txt"
+  ],
+  "seeded_faults": [
+    {
+      "fault_id": "FAULT-001",
+      "target_path": "transactional_file.py",
+      "replacement_file": "faults/leak_rollback_temporary.py.txt",
+      "expect_generated_detection": false,
+      "expect_hidden_detection": true
+    }
+  ],
+  "expected": {
+    "status": "success",
+    "validation_level": "executable",
+    "requirement_ids": ["AC-001", "BR-001", "EH-001", "FR-001", "TC-001"],
+    "minimum_generated_tests": 1,
+    "minimum_hidden_tests": 3
+  }
+}
