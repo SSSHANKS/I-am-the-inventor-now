@@ -113,7 +113,7 @@ Return ONLY a JSON object, no Markdown and no prose around it:
       "task_id": "<stage prefix>-001",
       "task_type": "<specific verb phrase, e.g. extract_validation_rules>",
       "output_field": "<one value from the allowed list you were given>",
-      "input_refs": [{"source": "evidence_catalogue", "evidence_id": "EV-014"}],
+      "input_refs": [{"source": "evidence_catalogue | reconstruction_priority", "evidence_id": "EV-014"}],
       "requirements": ["<what the executing agent must produce, and what not to invent>"],
       "min_items": 1
     }
@@ -127,6 +127,9 @@ Rules for the output:
 - task_id unique within the plan.
 - output_field MUST come from the allowed list. Never invent one.
 - input_refs carry evidence_id ONLY - no file, no line_start, no line_end, no evidence object.
+- Set source to reconstruction_priority only when the evidence id appears as a required
+  reconstruction priority and this task's output field is eligible for it. Otherwise set
+  source to evidence_catalogue.
 - requirements must be specific enough to act on. "Describe the module" is useless;
   "state the exact conditions under which the operation rejects input, and what it returns
   in each case" is useful.

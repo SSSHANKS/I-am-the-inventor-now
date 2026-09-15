@@ -8,7 +8,7 @@ from marshmallow import Schema
 
 from packages.agents.base_agent.client import ChatClient, ChatResponse, build_client
 from packages.modules.skills.reading import Reader, ReadingError
-from packages.modules.supervising import ArtifactPolicy, Supervisor
+from packages.modules.supervising import ArtifactPolicy, ExtractionPolicy, Supervisor
 from packages.modules.supervising.policies import BaseSupervisorPolicy
 from packages.modules.supervising.utils.diagnostics import IterationRecorder, NullRecorder
 from packages.modules.supervising.verifiers import ArtifactVerifier
@@ -248,23 +248,40 @@ class BaseAgent:
                     handle_missing_sections(aggregated, mini_task, output_field, task_id)
                 continue
 
+            extraction_context = self._extraction_context(mini_task, sections)
+            if source_reader is not None and extraction_context["unresolved_required_evidence_ids"]:
+                missing = ", ".join(extraction_context["unresolved_required_evidence_ids"])
+                raise ValueError(
+                    f"{final_agent_name} mini task {task_id} cannot resolve required "
+                    f"reconstruction evidence: {missing}"
+                )
+
             for section in sections:
                 files_seen.add(section["file"])
 
             try:
                 raw = self.run(
                     instruction=narrow_instruction,
-                    task_instruction=build_narrow_prompt(
+                    task_instruction=self._with_extraction_contract(
+                        build_narrow_prompt(
+                            mini_task,
+                            output_field,
+                            task_id,
+                            sections,
+                        ),
                         mini_task,
-                        output_field,
-                        task_id,
                         sections,
                     ),
                     agent_name=f"{final_agent_name} [{task_id} -> {output_field}]",
-                    schema=output_field_schemas[output_field](),
+                    supervisor_policy=ExtractionPolicy(
+                        name=f"{final_agent_name} [{task_id} -> {output_field}]",
+                        schema=output_field_schemas[output_field](),
+                    ),
+                    supervisor_context=extraction_context,
                     artifact_verifier=None,
                     verifier_allowed_files=None,
                     repo_local_path=repo_local_path,
+                    validation_retry_limit=min(self.max_validation_retries, 2),
                 )
             except Exception as exc:
                 if on_task_failure is None:
@@ -347,6 +364,54 @@ class BaseAgent:
             recorder_sub_scope=recorder_sub_scope or f"{final_agent_name} [aggregated]",
         )
 
+    @staticmethod
+    def _extraction_context(
+        mini_task: dict[str, Any], sections: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        required_ids = {
+            ref.get("evidence_id")
+            for ref in mini_task.get("input_refs", [])
+            if isinstance(ref, dict) and ref.get("source") == "reconstruction_priority"
+        }
+        required_source_refs = [
+            section["source_ref"]
+            for section in sections
+            if section.get("evidence_id") in required_ids
+        ]
+        resolved_ids = {
+            section.get("evidence_id")
+            for section in sections
+            if isinstance(section.get("evidence_id"), str)
+        }
+        return {
+            "minimum_items": mini_task.get("min_items", 0),
+            "valid_source_refs": [section["source_ref"] for section in sections],
+            "required_source_refs": required_source_refs,
+            # Artifact-only synthesis has no numbered source sections. Its fragments
+            # must instead carry the opaque evidence identifiers into the specification.
+            "required_evidence_ids": sorted(required_ids) if not sections else [],
+            "unresolved_required_evidence_ids": sorted(required_ids - resolved_ids),
+        }
+
+    @classmethod
+    def _with_extraction_contract(
+        cls,
+        prompt: str,
+        mini_task: dict[str, Any],
+        sections: list[dict[str, Any]],
+    ) -> str:
+        context = cls._extraction_context(mini_task, sections)
+        return (
+            f"{prompt}\n\n"
+            "[extraction_completeness_contract]\n"
+            f"minimum_distinct_items: {context['minimum_items']}\n"
+            f"required_source_refs: {json.dumps(context['required_source_refs'])}\n"
+            f"required_evidence_ids: {json.dumps(context['required_evidence_ids'])}\n"
+            "Every required source_ref or evidence id must be represented by a distinct "
+            "output item. This is a completeness requirement, not permission to invent facts.\n"
+            "[/extraction_completeness_contract]"
+        )
+
     def run(
         self,
         task_instruction: str,
@@ -360,6 +425,7 @@ class BaseAgent:
         repo_local_path: str | None = None,
         recorder_scope: str = "agents",
         recorder_sub_scope: str | None = None,
+        validation_retry_limit: int | None = None,
     ) -> str:
         """One exchange with the model, then supervision.
 
@@ -396,6 +462,7 @@ class BaseAgent:
             supervisor_policy=supervisor_policy,
             supervisor_context=supervisor_context,
             recorder=recorder,
+            validation_retry_limit=validation_retry_limit,
         )
 
     def _finalize(
@@ -410,6 +477,7 @@ class BaseAgent:
         supervisor_context: dict[str, Any] | None,
         recorder: Any,
         base_len: int | None = None,
+        validation_retry_limit: int | None = None,
     ) -> str:
         policy = supervisor_policy
         if policy is None and (schema is not None or artifact_verifier is not None):
@@ -427,7 +495,11 @@ class BaseAgent:
 
         supervisor = Supervisor(
             repair_callback=self.chat_content,
-            max_validation_retries=self.max_validation_retries,
+            max_validation_retries=(
+                self.max_validation_retries
+                if validation_retry_limit is None
+                else validation_retry_limit
+            ),
         )
         return supervisor.supervise(
             content=content,
@@ -482,6 +554,7 @@ class BaseAgent:
             resolved = self._resolve_ref(ref)
             if resolved is None:
                 continue
+            evidence_id = ref.get("evidence_id")
             file_path, line_start, line_end = resolved
 
             if (
@@ -507,6 +580,7 @@ class BaseAgent:
                 {
                     "source_ref": len(sections) + 1,
                     "ref_source": ref.get("source"),
+                    "evidence_id": evidence_id,
                     "file": file_path,
                     "line_start": line_start,
                     "line_end": line_end,

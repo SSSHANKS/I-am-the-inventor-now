@@ -1,0 +1,35 @@
+{
+  "schema_version": 2,
+  "name": "python-multi-module",
+  "archetype": "multi-module",
+  "compatibility_mode": "renamed",
+  "specification_file": "specification.txt",
+  "plan_file": "plan.json",
+  "generated_files": {
+    "catalog/__init__.py": "generated/catalog_init.py.txt",
+    "catalog/normalize.py": "generated/normalize.py.txt",
+    "catalog/store.py": "generated/store.py.txt",
+    "tests/test_catalog.py": "generated/test_catalog.py.txt",
+    "pyproject.toml": "generated/pyproject.toml.txt",
+    "README.md": "generated/README.md.txt"
+  },
+  "hidden_tests": [
+    "hidden/catalog_hidden.py.txt"
+  ],
+  "seeded_faults": [
+    {
+      "fault_id": "FAULT-001",
+      "target_path": "catalog/store.py",
+      "replacement_file": "faults/case_sensitive_lookup.py.txt",
+      "expect_generated_detection": false,
+      "expect_hidden_detection": true
+    }
+  ],
+  "expected": {
+    "status": "success",
+    "validation_level": "executable",
+    "requirement_ids": ["AC-001", "BR-001", "FR-001", "FR-002", "TC-001"],
+    "minimum_generated_tests": 1,
+    "minimum_hidden_tests": 3
+  }
+}

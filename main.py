@@ -51,12 +51,14 @@ from packages.modules.boundary import (
 from packages.modules.handoff import HandoffError, export_clean_handoff
 from packages.modules.indexing import SourceCodeIndexer, SourceDocIndexer
 from packages.modules.ingesting import provide_source_ingestor
+from packages.modules.reconstruction_ir import build_dirty_inventory
 from packages.modules.skills.reading import Reader
 from packages.modules.storing import Storage
 from packages.modules.supervising.schemas import (
     EvidenceCatalogueSchema,
     ManifestSchema,
     NeutralManifestSchema,
+    ReconstructionInventorySchema,
 )
 from packages.modules.supervising.verifiers.planning import OUTPUT_FIELDS_BY_STAGE
 
@@ -155,7 +157,19 @@ def run(args: argparse.Namespace) -> Path:
     registered = register_code_identifiers(code_index, alias_map)
     minted = mint_evidence_ids(alias_map, code_index, doc_index)
 
-    catalogue_artifact = build_evidence_catalogue(alias_map, code_index, doc_index)
+    planning_inventory = build_dirty_inventory(code_index, alias_map)
+    required_catalogue_ids = {
+        item["evidence_id"]
+        for item in planning_inventory["items"]
+        if item.get("reconstruction_target")
+        and isinstance(item.get("evidence_id"), str)
+    }
+    catalogue_artifact = build_evidence_catalogue(
+        alias_map,
+        code_index,
+        doc_index,
+        required_evidence_ids=required_catalogue_ids,
+    )
     catalogue = catalogue_artifact["entries"]
     storage.save_artifact("evidence_catalogue.json", catalogue_artifact, EvidenceCatalogueSchema())
     neutral_manifest_artifact = neutral_manifest(manifest, alias_map)
@@ -197,6 +211,7 @@ def run(args: argparse.Namespace) -> Path:
             judge=plan_judge,
             code_index=code_index,
             doc_index=doc_index,
+            reconstruction_inventory=planning_inventory,
         )
         plan_name = f"{_plan_name(stage)}.json"
         storage.save_json(plan_name, plan)
@@ -234,6 +249,29 @@ def run(args: argparse.Namespace) -> Path:
     )
     storage.save_json("behavior_report.json", behavior_report)
     log.info("stage complete: behaviour")
+
+    inventory = build_dirty_inventory(
+        code_index,
+        alias_map,
+        documentation_report=documentation_report,
+        code_facts_report=code_facts_report,
+        behavior_report=behavior_report,
+    )
+    storage.save_artifact(
+        "reconstruction_inventory.json", inventory, ReconstructionInventorySchema()
+    )
+    coverage = inventory["coverage"]
+    log.info(
+        "inventory coverage: %d/%d unit(s) represented in analysis reports (%.2f%%); "
+        "%d/%d reconstruction target(s) covered (%.2f%%); %d indexing issue(s)",
+        coverage["covered_count"],
+        coverage["total_count"],
+        coverage["coverage_percent"],
+        coverage["covered_reconstruction_target_count"],
+        coverage["reconstruction_target_count"],
+        coverage["reconstruction_target_coverage_percent"],
+        coverage["issue_count"],
+    )
 
     specification = SpecSynthesizerAgent(**agent_kwargs("spec_synthesizer")).synthesize(
         source_manifest=manifest,
@@ -366,21 +404,41 @@ def _stubbed_reply(prompt: str) -> str:
     if "<evidence_catalogue>" in prompt:
         stage = prompt.split("<stage>", 1)[1].split("</stage>", 1)[0].strip()
         fields = sorted(OUTPUT_FIELDS_BY_STAGE[stage])
+        try:
+            priority_block = prompt.split("<reconstruction_priorities>", 1)[1].split(
+                "</reconstruction_priorities>", 1
+            )[0]
+            priorities = json.loads(priority_block)
+        except (IndexError, json.JSONDecodeError):
+            priorities = []
+        tasks = [
+            {
+                "task_id": f"{stage[:4].upper()}-{index:03d}",
+                "task_type": f"extract_{field}",
+                "output_field": field,
+                "input_refs": [],
+                "requirements": ["stubbed run"],
+                "min_items": 1,
+            }
+            for index, field in enumerate(fields, start=1)
+        ]
+        for index, priority in enumerate(priorities):
+            evidence_id = priority.get("evidence_id") if isinstance(priority, dict) else None
+            if isinstance(evidence_id, str) and tasks:
+                allowed_fields = priority.get("required_output_fields") or []
+                eligible = [
+                    task for task in tasks if task["output_field"] in allowed_fields
+                ] or tasks
+                task = eligible[index % len(eligible)]
+                task["input_refs"].append(
+                    {"source": "reconstruction_priority", "evidence_id": evidence_id}
+                )
+                task["min_items"] = max(task["min_items"], len(task["input_refs"]))
         return json.dumps(
             {
                 "stage": stage,
                 "summary": "stubbed plan covering every allowed field once",
-                "mini_tasks": [
-                    {
-                        "task_id": f"{stage[:4].upper()}-{index:03d}",
-                        "task_type": f"extract_{field}",
-                        "output_field": field,
-                        "input_refs": [],
-                        "requirements": ["stubbed run"],
-                        "min_items": 1,
-                    }
-                    for index, field in enumerate(fields, start=1)
-                ],
+                "mini_tasks": tasks,
             }
         )
 
@@ -389,19 +447,112 @@ def _stubbed_reply(prompt: str) -> str:
     if "doc_labeled" in prompt:
         return json.dumps({"label": "documented", "value": "A stubbed finding."})
     if "target_section" in prompt:
+        count, _refs, evidence_ids = _stubbed_extraction_contract(prompt)
         return json.dumps(
-            {"items": [{"source_ref": None, "heading": "Section", "markdown": "Stubbed."}]}
+            {
+                "items": [
+                    {
+                        "source_ref": None,
+                        "heading": f"Section {index + 1}",
+                        "markdown": (
+                            f"Stubbed requirement {index + 1}. Evidence: "
+                            f"{evidence_ids[index] if index < len(evidence_ids) else 'not available'}"
+                        ),
+                    }
+                    for index in range(count)
+                ]
+            }
         )
     # The requested field, not merely a mention of it: every prompt lists all allowed
     # fields, so matching on the whole text answers the wrong schema.
     if "[output_field]" in prompt:
         tail = prompt.split("[output_field]", 1)[1].strip().splitlines()
         field = tail[0].split()[0] if tail and tail[0].split() else ""
-        if field.endswith("open_questions"):
-            return json.dumps(
-                {"items": [{"source_ref": None, "label": "missing", "value": "Stubbed question."}]}
-            )
+        return json.dumps({"items": _stubbed_narrow_items(field, prompt)})
     return json.dumps({"items": []})
+
+
+def _stubbed_extraction_contract(prompt: str) -> tuple[int, list[int], list[str]]:
+    def value(name: str, fallback: str) -> str:
+        marker = f"{name}:"
+        if marker not in prompt:
+            return fallback
+        return prompt.split(marker, 1)[1].splitlines()[0].strip()
+
+    try:
+        count = max(1, int(value("minimum_distinct_items", "1")))
+    except ValueError:
+        count = 1
+    try:
+        refs = json.loads(value("required_source_refs", "[]"))
+    except json.JSONDecodeError:
+        refs = []
+    try:
+        evidence_ids = json.loads(value("required_evidence_ids", "[]"))
+    except json.JSONDecodeError:
+        evidence_ids = []
+    return count, refs, evidence_ids
+
+
+def _stubbed_narrow_items(field: str, prompt: str) -> list[dict]:
+    count, required_refs, _evidence_ids = _stubbed_extraction_contract(prompt)
+    refs = [*required_refs, *([1] * count)][:count]
+
+    def base(index: int) -> dict:
+        return {"source_ref": refs[index] if refs else None, "label": "observed"}
+
+    items = []
+    for index in range(count):
+        item = base(index)
+        suffix = index + 1
+        if field == "symbols":
+            item.update(
+                symbol=f"stub_symbol_{suffix}", kind="function", signature="()",
+                inputs=[], returns="object", description=f"Stubbed symbol {suffix}.",
+            )
+        elif field == "imports":
+            item["import"] = f"stub_dependency_{suffix}"
+        elif field == "calls":
+            item.update(caller=f"caller_{suffix}", callee=f"callee_{suffix}")
+        elif field == "state_and_side_effects":
+            item.update(
+                symbol=f"stub_symbol_{suffix}", state_read=[], state_written=[],
+                side_effects=[], value=f"Stubbed state fact {suffix}.",
+            )
+        elif field == "errors_and_exceptions":
+            item.update(
+                symbol=f"stub_symbol_{suffix}", error="stub error",
+                handling="propagates", value=f"Stubbed error fact {suffix}.",
+            )
+        elif field == "behaviors":
+            item.update(
+                name=f"behavior_{suffix}", description=f"Stubbed behavior {suffix}.",
+                inputs=[], outputs=[], preconditions=[], postconditions=[], testability="unit",
+            )
+        elif field == "edge_cases":
+            item.update(
+                behavior=f"behavior_{suffix}", case=f"case_{suffix}", current_result=None,
+                expected_result=None, expected_source="unknown",
+            )
+        elif field == "error_handling":
+            item.update(
+                behavior=f"behavior_{suffix}", error="stub error", handling="propagates"
+            )
+        elif field == "test_candidates":
+            item.update(
+                name=f"scenario_{suffix}", test_type="unit", given=[], when=[], then=[],
+                assertions=[f"observe result {suffix}"],
+            )
+        elif field == "specification_requirements":
+            item.update(requirement=f"Stubbed requirement {suffix}.", source="code")
+        else:
+            item = {
+                "source_ref": refs[index] if refs else None,
+                "label": "missing",
+                "value": f"Stubbed question {suffix}.",
+            }
+        items.append(item)
+    return items
 
 
 def _rendered_findings(specification: str) -> int:

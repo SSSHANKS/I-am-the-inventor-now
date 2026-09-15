@@ -1,0 +1,3 @@
+from .store import contains_name
+
+__all__ = ["contains_name"]

@@ -14,7 +14,7 @@ from typing import Any
 
 from packages.agents.border_team.gate_agent import BorderGateAgent
 from packages.modules.border import BorderGateError, BorderVerdict, strip_border_review_section
-from packages.modules.boundary import AliasMap, scrub_identifiers
+from packages.modules.boundary import BORDER_REVIEW, AliasMap
 from packages.modules.storing import Storage
 from packages.modules.supervising.schemas.border import BorderVerdictSchema
 
@@ -40,7 +40,7 @@ def scrub_failed_originals(
     noun so the model is not asked to invent a substitute while the leak is still visible.
     """
     body = strip_border_review_section(text)
-    body = scrub_identifiers(body, alias_map)
+    body = "\n".join(line for line in body.splitlines() if BORDER_REVIEW not in line)
 
     replacements: list[tuple[str, str]] = []
     for item in findings:

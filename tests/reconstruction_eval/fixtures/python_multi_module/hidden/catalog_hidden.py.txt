@@ -1,0 +1,14 @@
+from catalog import contains_name
+from catalog.normalize import normalize_name
+
+
+def test_normalization_uses_casefold():
+    assert normalize_name("  STRASSE  ") == "strasse"
+
+
+def test_lookup_normalizes_candidate():
+    assert contains_name(["alpha", "beta"], "  ALPHA ")
+
+
+def test_lookup_normalizes_stored_names():
+    assert contains_name(["  Alpha  ", "beta"], "alpha")

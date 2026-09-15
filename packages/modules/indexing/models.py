@@ -21,6 +21,7 @@ class SourceCodeIndex:
     commit_hash: str | None = None
     files_indexed: list[str] = field(default_factory=list)
     files_skipped: list[dict[str, Any]] = field(default_factory=list)
+    modules: list[dict[str, Any]] = field(default_factory=list)
     imports: list[dict[str, Any]] = field(default_factory=list)
     classes: list[dict[str, Any]] = field(default_factory=list)
     functions: list[dict[str, Any]] = field(default_factory=list)

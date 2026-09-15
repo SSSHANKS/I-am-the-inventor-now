@@ -93,6 +93,7 @@ class PlanVerifier:
         stage: str,
         alias_map: Any | None = None,
         evidence_catalogue: list[dict[str, Any]] | None = None,
+        reconstruction_priorities: list[dict[str, Any]] | None = None,
         **_ignored: Any,
     ) -> dict[str, Any]:
         """Return the standard verification result: valid, count, issues.
@@ -141,12 +142,109 @@ class PlanVerifier:
             )
 
         issues.extend(self._verify_coverage(payload, mini_tasks, stage, allowed))
+        issues.extend(
+            self._verify_reconstruction_priorities(
+                mini_tasks, reconstruction_priorities or []
+            )
+        )
 
         return {
             "valid": not any(issue["severity"] == "error" for issue in issues),
             "checked_task_count": len(mini_tasks),
             "issues": issues,
         }
+
+    def _verify_reconstruction_priorities(
+        self,
+        mini_tasks: list[dict[str, Any]],
+        priorities: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        issues: list[dict[str, Any]] = []
+        required = [
+            item
+            for item in priorities
+            if isinstance(item, dict)
+            and item.get("required") is True
+            and isinstance(item.get("evidence_id"), str)
+        ]
+        for item in required:
+            evidence_id = item["evidence_id"]
+            allowed_fields = {
+                field
+                for field in item.get("required_output_fields", [])
+                if isinstance(field, str)
+            }
+            citing_tasks = [
+                task
+                for task in mini_tasks
+                if evidence_id
+                in {
+                    ref.get("evidence_id")
+                    for ref in task.get("input_refs", [])
+                    if isinstance(ref, dict)
+                }
+            ]
+            if not citing_tasks:
+                issues.append(
+                    _issue(
+                        "error",
+                        "$.reconstruction_priorities",
+                        f"Plan omits required prioritized evidence: {evidence_id}",
+                    )
+                )
+            elif allowed_fields and not any(
+                task.get("output_field") in allowed_fields for task in citing_tasks
+            ):
+                issues.append(
+                    _issue(
+                        "error",
+                        "$.reconstruction_priorities",
+                        f"Prioritized evidence {evidence_id} must feed one of "
+                        f"{sorted(allowed_fields)}, not only unrelated output fields.",
+                    )
+                )
+            elif not any(
+                task.get("output_field") in allowed_fields
+                and any(
+                    isinstance(ref, dict)
+                    and ref.get("evidence_id") == evidence_id
+                    and ref.get("source") == "reconstruction_priority"
+                    for ref in task.get("input_refs", [])
+                )
+                for task in citing_tasks
+            ):
+                issues.append(
+                    _issue(
+                        "error",
+                        "$.reconstruction_priorities",
+                        f"Required prioritized evidence {evidence_id} must be marked with "
+                        "source='reconstruction_priority' in an eligible task.",
+                    )
+                )
+
+        required_by_id = {item["evidence_id"]: item for item in required}
+        for position, task in enumerate(mini_tasks):
+            output_field = task.get("output_field")
+            assigned = {
+                evidence_id
+                for ref in task.get("input_refs", [])
+                if isinstance(ref, dict)
+                and (evidence_id := ref.get("evidence_id")) in required_by_id
+                and ref.get("source") == "reconstruction_priority"
+                and output_field
+                in set(required_by_id[evidence_id].get("required_output_fields", []))
+            }
+            min_items = task.get("min_items")
+            if assigned and isinstance(min_items, int) and min_items < len(assigned):
+                issues.append(
+                    _issue(
+                        "error",
+                        f"$.mini_tasks[{position}].min_items",
+                        f"Task assigns {len(assigned)} prioritized contracts but requests only "
+                        f"{min_items} item(s). Set min_items to at least {len(assigned)}.",
+                    )
+                )
+        return issues
 
     def _verify_coverage(
         self,

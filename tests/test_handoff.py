@@ -36,6 +36,17 @@ def test_failed_border_cannot_export_handoff(tmp_path):
     assert not (tmp_path / "handoff").exists()
 
 
+def test_inline_border_review_marker_cannot_cross_even_with_pass_verdict(tmp_path):
+    contaminated = "# Specification\n\nBORDER-REVIEW: unresolved wording.\n"
+
+    with pytest.raises(HandoffError, match="still contains"):
+        export_clean_handoff(
+            tmp_path / "handoff", contaminated, {"status": "pass"}
+        )
+
+    assert not (tmp_path / "handoff").exists()
+
+
 def test_modified_or_expanded_handoff_is_rejected(tmp_path):
     root = export_clean_handoff(tmp_path / "handoff", SPECIFICATION, {"status": "pass"})
     (root / "specification.md").write_text("# Modified\n", encoding="utf-8")

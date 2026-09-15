@@ -14,7 +14,7 @@ from typing import Any
 from packages.modules.indexing.config_file import index_config_file
 from packages.modules.indexing.document_file import index_document_file
 from packages.modules.indexing.json_file import index_json_file
-from packages.modules.indexing.models import SourceCodeIndex, SourceDocIndex
+from packages.modules.indexing.models import SourceCodeIndex, SourceDocIndex, evidence
 from packages.modules.indexing.notebook_file import index_notebook_file
 from packages.modules.indexing.python_file import index_python_file
 from packages.modules.indexing.source_file import PROFILE_BY_SUFFIX, index_source_file
@@ -42,6 +42,7 @@ CODE_HANDLERS: dict[str, FileHandler] = {
 }
 
 DOC_SUFFIXES = frozenset({".md", ".markdown", ".rst", ".txt", ".adoc", ""})
+_MAX_MODULE_EVIDENCE_LINES = 80
 
 
 def resolve_code_handler(relative_path: str) -> FileHandler | None:
@@ -94,7 +95,44 @@ class SourceCodeIndexer(_Indexer):
             branch=manifest.branch,
             commit_hash=manifest.commit_hash,
         ).to_dict()
-        return self._walk(manifest.code, result, resolve_code_handler)
+        self._walk(manifest.code, result, resolve_code_handler)
+        self._index_modules(result)
+        return result
+
+    def _index_modules(self, result: dict[str, Any]) -> None:
+        """Give each indexed source unit evidence independent of its definitions."""
+        config_paths = {
+            item.get("file")
+            for item in result["configs"]
+            if isinstance(item, dict)
+        }
+        for relative_path in result["files_indexed"]:
+            if relative_path in config_paths:
+                continue
+            try:
+                content = self.source_reader.read_file(relative_path)
+            except Exception as exc:
+                # A source could disappear between its format-specific pass and this
+                # summary pass. Preserve the partial index and expose that gap.
+                log.exception("Could not index module evidence for %s", relative_path)
+                result["errors"].append(
+                    {
+                        "file": relative_path,
+                        "error_type": type(exc).__name__,
+                        "message": f"module evidence: {exc}",
+                    }
+                )
+                continue
+            lines = content.splitlines()
+            line_end = min(len(lines), _MAX_MODULE_EVIDENCE_LINES)
+            result["modules"].append(
+                {
+                    "file": relative_path,
+                    "kind": "source_module",
+                    "line_count": len(lines),
+                    "evidence": evidence(relative_path, lines, 1, line_end or 1),
+                }
+            )
 
 
 class SourceDocIndexer(_Indexer):

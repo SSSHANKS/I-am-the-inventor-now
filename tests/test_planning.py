@@ -4,7 +4,10 @@ import json
 
 import pytest
 
+from main import _stubbed_reply
+from packages.agents.base_agent import StubTextClient
 from packages.agents.dirt_team.plan_judge_agent import SCORED_PILLARS, total_score
+from packages.agents.planning import PlanningAgent
 from packages.agents.planning.loop import (
     MAX_ROUNDS,
     PlanAttempt,
@@ -12,12 +15,21 @@ from packages.agents.planning.loop import (
     run_plan_loop,
     select_best,
 )
-from packages.agents.planning.planner import filter_evidence_catalogue
+from packages.agents.planning.planner import (
+    _bounded_planner_catalogue,
+    _complete_priority_plan,
+    build_task_instruction,
+    filter_evidence_catalogue,
+)
 from packages.modules.boundary import (
     AliasMap,
     evidence_catalogue,
     mint_evidence_ids,
     register_code_identifiers,
+)
+from packages.modules.reconstruction_ir import (
+    build_dirty_inventory,
+    build_planning_priorities,
 )
 from packages.modules.supervising.schemas import PlanningSchema, get_validation_errors
 from packages.modules.supervising.verifiers.planning import PlanVerifier
@@ -110,6 +122,130 @@ def test_planners_receive_only_stage_compatible_evidence(mapped):
     assert len(filter_evidence_catalogue(catalogue, "behavior")) == len(catalogue)
 
 
+def test_planner_receives_bounded_neutral_reconstruction_priorities(mapped):
+    catalogue = evidence_catalogue(mapped, CODE_INDEX, DOC_INDEX)
+    code_catalogue = filter_evidence_catalogue(catalogue, "code_facts")
+    inventory_index = {
+        **CODE_INDEX,
+        "files_indexed": ["app/ui.py", "app/calc.py", "main.py"],
+        "files_skipped": [],
+        "errors": [],
+    }
+    inventory = build_dirty_inventory(inventory_index, mapped)
+
+    priorities = build_planning_priorities(
+        inventory, code_catalogue, "code_facts", limit=2
+    )
+    prompt = build_task_instruction(
+        "code_facts", code_catalogue, ("symbols",), reconstruction_priorities=priorities
+    )
+
+    assert len(priorities) == 2
+    assert all(priority["required"] is True for priority in priorities)
+    assert all(priority["required_output_fields"] == ["symbols"] for priority in priorities)
+    assert "<reconstruction_priorities>" in prompt
+    assert "app/ui.py" not in prompt
+    assert "Calculadora" not in prompt
+
+
+def test_bounded_catalogue_always_keeps_required_priority_ids():
+    catalogue = [{"evidence_id": f"EV-{index:03d}"} for index in range(1, 101)]
+    priorities = [{"evidence_id": "EV-099"}, {"evidence_id": "EV-100"}]
+
+    visible = _bounded_planner_catalogue(catalogue, priorities, limit=5)
+
+    assert len(visible) == 5
+    assert [item["evidence_id"] for item in visible[:2]] == ["EV-099", "EV-100"]
+
+
+def test_overflow_priorities_become_deterministic_extraction_tasks():
+    plan = _covering_plan("code_facts")
+    priorities = [
+        {
+            "evidence_id": evidence_id,
+            "required": True,
+            "required_output_fields": ["symbols"],
+        }
+        for evidence_id in ("EV-020", "EV-021", "EV-022")
+    ]
+    catalogue = [
+        {"evidence_id": evidence_id, "source_type": "code"}
+        for evidence_id in ("EV-001", "EV-020", "EV-021", "EV-022")
+    ]
+
+    completed = json.loads(
+        _complete_priority_plan(
+            json.dumps(plan),
+            "code_facts",
+            [priorities],
+            catalogue,
+            priorities,
+            None,
+        )
+    )
+    overflow = [
+        task for task in completed["mini_tasks"] if "OVERFLOW" in task["task_id"]
+    ]
+
+    assert len(overflow) == 1
+    assert overflow[0]["output_field"] == "symbols"
+    assert overflow[0]["min_items"] == 3
+    assert {ref["evidence_id"] for ref in overflow[0]["input_refs"]} == {
+        "EV-020",
+        "EV-021",
+        "EV-022",
+    }
+    assert all(ref["source"] == "reconstruction_priority" for ref in overflow[0]["input_refs"])
+
+
+def test_planner_covers_overflow_without_additional_planning_calls(manifest):
+    catalogue = [
+        {
+            "evidence_id": f"EV-{index + 1:03d}",
+            "source_type": "code",
+            "source_role": "definition",
+            "kind": "function",
+            "about": "a reconstruction contract",
+        }
+        for index in range(25)
+    ]
+    inventory = {
+        "items": [
+            {
+                "inventory_id": f"INV-{index:012X}",
+                "evidence_id": entry["evidence_id"],
+                "priority": "high",
+                "contract_role": "public_candidate",
+                "source_scope": "production",
+                "source_path": f"src/component_{index}.py",
+                "kind": "function",
+                "reconstruction_target": True,
+            }
+            for index, entry in enumerate(catalogue)
+        ]
+    }
+    client = StubTextClient(_stubbed_reply)
+    planner = PlanningAgent(model="stub/model", chat_client=client)
+
+    plan = json.loads(
+        planner.plan(
+            "code_facts",
+            manifest,
+            evidence_catalogue=catalogue,
+            reconstruction_inventory=inventory,
+        )
+    )
+    priority_refs = {
+        ref["evidence_id"]
+        for task in plan["mini_tasks"]
+        for ref in task["input_refs"]
+        if ref["source"] == "reconstruction_priority"
+    }
+
+    assert priority_refs == {entry["evidence_id"] for entry in catalogue}
+    assert client.call_count == 1
+
+
 def test_the_catalogue_a_planner_sees_carries_no_originals(mapped):
     """The planner cannot leak what it was never shown."""
     from packages.modules.boundary import find_residual_originals
@@ -190,6 +326,112 @@ def test_a_ref_carrying_a_file_path_is_an_error(mapped):
     result = PlanVerifier().verify(plan, "documentation", alias_map=mapped)
     assert result["valid"] is False
     assert any("section 2" in i["message"] for i in result["issues"])
+
+
+def test_plan_must_cite_every_required_reconstruction_priority(mapped):
+    plan = _covering_plan("code_facts")
+    plan["mini_tasks"][0]["input_refs"][0]["source"] = "reconstruction_priority"
+    priorities = [
+        {
+            "evidence_id": "EV-001",
+            "required": True,
+            "required_output_fields": ["symbols"],
+        },
+        {
+            "evidence_id": "EV-002",
+            "required": True,
+            "required_output_fields": ["symbols"],
+        },
+    ]
+    result = PlanVerifier().verify(
+        plan,
+        "code_facts",
+        alias_map=mapped,
+        reconstruction_priorities=priorities,
+    )
+
+    assert result["valid"] is False
+    assert any("EV-002" in issue["message"] for issue in result["issues"])
+
+
+def test_prioritized_evidence_must_feed_a_contract_output_field(mapped):
+    plan = _covering_plan("code_facts")
+    plan["mini_tasks"][0]["input_refs"] = [
+        {"source": "evidence_catalogue", "evidence_id": "EV-002"}
+    ]
+    priorities = [
+        {
+            "evidence_id": "EV-002",
+            "required": True,
+            "required_output_fields": ["symbols"],
+        }
+    ]
+
+    result = PlanVerifier().verify(
+        plan,
+        "code_facts",
+        alias_map=mapped,
+        reconstruction_priorities=priorities,
+    )
+
+    assert result["valid"] is False
+    assert any("must feed" in issue["message"] for issue in result["issues"])
+
+
+def test_grouped_priority_task_must_request_one_item_per_contract(mapped):
+    plan = _covering_plan("code_facts")
+    symbol_task = next(
+        task for task in plan["mini_tasks"] if task["output_field"] == "symbols"
+    )
+    symbol_task["input_refs"] = [
+        {"source": "reconstruction_priority", "evidence_id": "EV-001"},
+        {"source": "reconstruction_priority", "evidence_id": "EV-002"},
+    ]
+    priorities = [
+        {
+            "evidence_id": evidence_id,
+            "required": True,
+            "required_output_fields": ["symbols"],
+        }
+        for evidence_id in ("EV-001", "EV-002")
+    ]
+
+    result = PlanVerifier().verify(
+        plan,
+        "code_facts",
+        alias_map=mapped,
+        reconstruction_priorities=priorities,
+    )
+
+    assert result["valid"] is False
+    assert any("at least 2" in issue["message"] for issue in result["issues"])
+
+
+def test_required_priority_ref_must_be_marked_for_runtime_coverage(mapped):
+    plan = _covering_plan("code_facts")
+    symbol_task = next(
+        task for task in plan["mini_tasks"] if task["output_field"] == "symbols"
+    )
+    symbol_task["input_refs"] = [
+        {"source": "evidence_catalogue", "evidence_id": "EV-001"}
+    ]
+    priorities = [
+        {
+            "evidence_id": "EV-001",
+            "required": True,
+            "required_output_fields": ["symbols"],
+        }
+    ]
+
+    result = PlanVerifier().verify(
+        plan,
+        "code_facts",
+        alias_map=mapped,
+        reconstruction_priorities=priorities,
+    )
+
+    assert result["valid"] is False
+    assert any("must be marked" in issue["message"] for issue in result["issues"])
 
 
 def test_duplicate_task_ids_are_rejected(mapped):

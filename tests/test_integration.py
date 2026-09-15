@@ -16,6 +16,7 @@ import json
 
 import pytest
 
+from main import _stubbed_narrow_items
 from packages.agents.base_agent import StubTextClient
 from packages.agents.border_team import BorderGateAgent
 from packages.agents.dirt_team import (
@@ -108,19 +109,7 @@ class ScriptedModel:
 
         if "[output_field]" in prompt:
             field = self._output_field(prompt)
-            if field.endswith("open_questions"):
-                return json.dumps(
-                    {
-                        "items": [
-                            {
-                                "source_ref": None,
-                                "label": "missing",
-                                "value": "An unresolved question.",
-                            }
-                        ]
-                    }
-                )
-            return json.dumps({"items": []})
+            return json.dumps({"items": _stubbed_narrow_items(field, prompt)})
 
         return json.dumps({"items": []})
 

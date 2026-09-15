@@ -1,0 +1,67 @@
+{
+  "schema_version": 2,
+  "summary": "A multi-module catalog with a public package interface.",
+  "project_kind": "library",
+  "runtime": {"language": "Python", "minimum_version": "3.12"},
+  "dependencies": [],
+  "packages": [{"import_name": "catalog", "purpose": "Public catalog package"}],
+  "entry_points": [{"path": "catalog/__init__.py", "description": "Public catalog package"}],
+  "symbol_contracts": [
+    {
+      "symbol_id": "SYM-001",
+      "qualified_name": "catalog.normalize.normalize_name",
+      "kind": "function",
+      "signature": "normalize_name(value: str) -> str",
+      "visibility": "public",
+      "requirement_ids": ["FR-001"]
+    },
+    {
+      "symbol_id": "SYM-002",
+      "qualified_name": "catalog.store.contains_name",
+      "kind": "function",
+      "signature": "contains_name(values: list[str], candidate: str) -> bool",
+      "visibility": "public",
+      "requirement_ids": ["FR-002", "BR-001", "AC-001"]
+    }
+  ],
+  "files": [
+    {
+      "path": "catalog/normalize.py",
+      "purpose": "Implement canonical name normalization.",
+      "requirement_ids": ["FR-001"],
+      "provides": ["SYM-001"],
+      "requires": [],
+      "depends_on": [],
+      "generation_order": 1
+    },
+    {
+      "path": "catalog/store.py",
+      "purpose": "Implement normalized membership lookup.",
+      "requirement_ids": ["FR-002", "BR-001", "AC-001"],
+      "provides": ["SYM-002"],
+      "requires": ["SYM-001"],
+      "depends_on": ["catalog/normalize.py"],
+      "generation_order": 2
+    },
+    {
+      "path": "catalog/__init__.py",
+      "purpose": "Expose the catalog membership operation.",
+      "requirement_ids": ["FR-002", "BR-001", "AC-001"],
+      "provides": [],
+      "requires": ["SYM-002"],
+      "depends_on": ["catalog/store.py"],
+      "generation_order": 3
+    },
+    {
+      "path": "tests/test_catalog.py",
+      "purpose": "Verify normalization and public catalog lookup.",
+      "requirement_ids": ["FR-001", "FR-002", "BR-001", "AC-001", "TC-001"],
+      "provides": [],
+      "requires": ["SYM-001", "SYM-002"],
+      "depends_on": ["catalog/normalize.py", "catalog/store.py", "catalog/__init__.py"],
+      "generation_order": 4
+    }
+  ],
+  "validation_strategy": ["Import the public package and run pytest."],
+  "open_questions": []
+}

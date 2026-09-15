@@ -1,0 +1,7 @@
+from catalog import contains_name
+from catalog.normalize import normalize_name
+
+
+def test_catalog_lookup():
+    assert normalize_name(" Alpha ") == "alpha"
+    assert contains_name(["alpha", "beta"], "alpha")

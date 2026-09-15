@@ -13,7 +13,7 @@ raises on a suspected leak - it annotates. Enforcement belongs to
 """
 
 import re
-from collections.abc import Sequence
+from collections.abc import Sequence, Set
 from dataclasses import dataclass
 from typing import Any
 
@@ -321,6 +321,7 @@ def register_code_identifiers(code_index: dict[str, Any], alias_map: AliasMap) -
 #: Index collections worth citing in a plan, and the neutral noun describing each. The
 #: label is what a planner sees instead of a path, so it has to say enough to choose by.
 _CODE_CITABLE = {
+    "modules": "a source module",
     "analysis_targets": "an analysis target",
     "entrypoints": "a program entry point",
     "classes": "a component definition",
@@ -361,6 +362,8 @@ def build_evidence_catalogue(
     code_index: dict[str, Any] | None = None,
     doc_index: dict[str, Any] | None = None,
     limit_per_collection: int = 40,
+    *,
+    required_evidence_ids: Set[str] = frozenset(),
 ) -> dict[str, Any]:
     """The catalogue as a storable crossing artifact: entries plus its review notes.
 
@@ -368,6 +371,10 @@ def build_evidence_catalogue(
     it: the filter that admits a label was silent about rejections, and the catalogue was
     never written to disk. A label carrying three verbatim commands therefore reached the
     planner with no record anywhere. Persisting it, notes included, closes that.
+
+    The collection limit bounds optional supporting evidence only. IDs selected by
+    the reconstruction inventory always survive sampling, and an unresolved required
+    ID aborts the run before an incomplete plan can be presented as successful.
     """
     entries: list[dict[str, str]] = []
     notes: list[str] = []
@@ -382,11 +389,13 @@ def build_evidence_catalogue(
             candidates = list(index.get(collection) or [])
             if source_type == "code":
                 candidates.sort(key=_code_evidence_priority)
-            for item in candidates[:limit_per_collection]:
+            for position, item in enumerate(candidates):
                 evidence = item.get("evidence") if isinstance(item, dict) else None
                 if not isinstance(evidence, dict) or not isinstance(evidence.get("file"), str):
                     continue
                 reference = neutral_evidence_reference(evidence, alias_map)
+                if position >= max(0, limit_per_collection) and reference not in required_evidence_ids:
+                    continue
                 if not reference or reference in seen:
                     continue
                 seen.add(reference)
@@ -404,6 +413,10 @@ def build_evidence_catalogue(
         add(code_index, _CODE_CITABLE, "code")
     if doc_index:
         add(doc_index, _DOC_CITABLE, "documentation")
+    missing_required = required_evidence_ids - seen
+    if missing_required:
+        missing = ", ".join(sorted(missing_required))
+        raise ValueError(f"Required reconstruction evidence is absent from catalogue: {missing}")
     return {"entries": entries, "border_review": notes}
 
 

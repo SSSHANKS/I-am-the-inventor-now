@@ -48,6 +48,8 @@ def export_clean_handoff(
     body = strip_border_review_section(specification).strip() + "\n"
     if not body.startswith("# "):
         raise HandoffError("Approved specification must be raw Markdown")
+    if "BORDER-REVIEW" in body:
+        raise HandoffError("Approved specification still contains a BORDER-REVIEW marker")
     encoded = body.encode("utf-8")
     digest = hashlib.sha256(encoded).hexdigest()
     manifest = {
@@ -97,6 +99,8 @@ def load_clean_handoff(handoff_dir: str | Path) -> CleanHandoff:
         raise HandoffError("Handoff specification hash does not match handoff.json")
     if not specification.startswith("# "):
         raise HandoffError("Handoff specification is not Markdown")
+    if "BORDER-REVIEW" in specification:
+        raise HandoffError("Handoff specification contains a BORDER-REVIEW marker")
     # Deliberately do not retain the directory Path: its parent can contain Dirty-only
     # artifacts. Past this loader, the Clean controller gets text plus an integrity hash.
     return CleanHandoff(

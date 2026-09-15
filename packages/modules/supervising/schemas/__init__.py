@@ -45,6 +45,10 @@ from packages.modules.supervising.schemas.manifest import (
 )
 from packages.modules.supervising.schemas.plan_judge import PlanJudgementSchema
 from packages.modules.supervising.schemas.planner import PlanningSchema
+from packages.modules.supervising.schemas.reconstruction_inventory import (
+    ReconstructionInventorySchema,
+)
+from packages.modules.supervising.schemas.reconstruction_ir import ReconstructionIRSchema
 from packages.modules.supervising.schemas.spec_synthesizer import SpecNarrowMarkdownSchema
 from packages.modules.supervising.schemas.validator import (
     SchemaValidationError,
@@ -88,6 +92,8 @@ __all__ = [
     "NeutralManifestSchema",
     "PlanJudgementSchema",
     "PlanningSchema",
+    "ReconstructionIRSchema",
+    "ReconstructionInventorySchema",
     "SchemaValidationError",
     "SpecNarrowMarkdownSchema",
     "build_correction_prompt",

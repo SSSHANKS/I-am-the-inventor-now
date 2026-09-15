@@ -439,12 +439,15 @@ def _run_hidden_tests(
     if not hidden_tests:
         return HiddenEvaluation(passed=True, tests_run=0, output="No hidden tests declared")
     evaluation_root.mkdir(parents=True)
+    evaluation_root = evaluation_root.resolve()
+    project_root = project_root.resolve()
     paths: list[str] = []
     for index, content in enumerate(hidden_tests, start=1):
         target = evaluation_root / f"test_hidden_{index:03d}.py"
         target.write_text(content, encoding="utf-8")
         paths.append(str(target))
     temporary = evaluation_root / "tmp"
+    temporary.mkdir()
     environment = {
         key: os.environ[key]
         for key in ("SYSTEMROOT", "WINDIR")
@@ -470,6 +473,8 @@ def _run_hidden_tests(
             str(project_root),
             "-p",
             "no:cacheprovider",
+            "-o",
+            "addopts=",
             "-q",
             f"--basetemp={temporary}",
             *paths,

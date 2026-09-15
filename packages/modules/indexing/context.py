@@ -9,12 +9,17 @@ from typing import Any
 DEFAULT_AGENT_CONTEXT_LIMIT = 80
 
 CODE_FIELDS: dict[str, list[str]] = {
+    # Module evidence overlaps definition excerpts heavily. Keep the structural
+    # inventory here; planners resolve the bounded excerpt only when its ID is used.
+    "modules": ["file", "kind", "line_count"],
     "entrypoints": ["file", "kind", "line_start", "line_end", "evidence"],
     "analysis_targets": ["file", "target", "target_type", "reason", "evidence"],
     "classes": [
         "file",
         "name",
         "qualified_name",
+        "owner",
+        "definition_scope",
         "line_start",
         "line_end",
         "methods",
@@ -24,6 +29,7 @@ CODE_FIELDS: dict[str, list[str]] = {
         "file",
         "qualified_name",
         "owner",
+        "definition_scope",
         "args",
         "line_start",
         "line_end",

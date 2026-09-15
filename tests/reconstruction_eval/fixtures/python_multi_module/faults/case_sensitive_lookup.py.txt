@@ -1,0 +1,5 @@
+from .normalize import normalize_name
+
+
+def contains_name(values: list[str], candidate: str) -> bool:
+    return candidate in values

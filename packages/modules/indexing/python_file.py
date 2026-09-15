@@ -70,57 +70,20 @@ def _extract_imports(relative_path: str, tree: ast.AST, lines: list[str]) -> lis
 
 
 def _extract_classes(relative_path: str, tree: ast.AST, lines: list[str]) -> list[dict[str, Any]]:
-    classes = []
-
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.ClassDef):
-            continue
-
-        classes.append(
-            {
-                "file": relative_path,
-                "name": node.name,
-                "qualified_name": node.name,
-                "bases": [_safe_unparse(base) for base in node.bases],
-                "decorators": [_safe_unparse(decorator) for decorator in node.decorator_list],
-                "line_start": node.lineno,
-                "line_end": node.end_lineno or node.lineno,
-                "methods": [
-                    child.name
-                    for child in node.body
-                    if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
-                ],
-                "evidence": _node_evidence(relative_path, lines, node),
-            }
-        )
-
-    return sorted(classes, key=lambda item: (item["file"], item["line_start"], item["name"]))
+    visitor = _DefinitionVisitor(relative_path, lines)
+    visitor.visit(tree)
+    return sorted(
+        visitor.classes,
+        key=lambda item: (item["file"], item["line_start"], item["qualified_name"]),
+    )
 
 
 def _extract_functions(relative_path: str, tree: ast.AST, lines: list[str]) -> list[dict[str, Any]]:
-    functions = []
-
-    for parent, node in _iter_functions_with_parent(tree):
-        owner = parent.name if isinstance(parent, ast.ClassDef) else "module"
-        qualified_name = f"{owner}.{node.name}" if owner != "module" else node.name
-
-        functions.append(
-            {
-                "file": relative_path,
-                "name": node.name,
-                "qualified_name": qualified_name,
-                "owner": owner,
-                "kind": "async_function" if isinstance(node, ast.AsyncFunctionDef) else "function",
-                "args": _function_args(node.args),
-                "decorators": [_safe_unparse(decorator) for decorator in node.decorator_list],
-                "line_start": node.lineno,
-                "line_end": node.end_lineno or node.lineno,
-                "evidence": _node_evidence(relative_path, lines, node),
-            }
-        )
-
+    visitor = _DefinitionVisitor(relative_path, lines)
+    visitor.visit(tree)
     return sorted(
-        functions, key=lambda item: (item["file"], item["line_start"], item["qualified_name"])
+        visitor.functions,
+        key=lambda item: (item["file"], item["line_start"], item["qualified_name"]),
     )
 
 
@@ -167,6 +130,8 @@ def _build_python_targets(
         )
 
     for class_item in _extract_classes(relative_path, tree, lines):
+        if class_item["definition_scope"] == "function":
+            continue
         targets.append(
             {
                 "file": relative_path,
@@ -228,22 +193,75 @@ class _CallVisitor(ast.NodeVisitor):
         self.generic_visit(node)
 
 
-def _iter_functions_with_parent(tree: ast.AST):
-    """Yield (parent, function) for every function definition in the tree.
+class _DefinitionVisitor(ast.NodeVisitor):
+    """Collect definitions with their complete lexical owner chain."""
 
-    `body` is only a list on statement containers. On `IfExp` and `Lambda` it is a
-    single expression node, so iterating it raises TypeError - which the per-file
-    handler caught, aborting that file partway through indexing. Any module using a
-    ternary or a lambda therefore lost its functions, entrypoints, calls and analysis
-    targets while still being recorded as indexed.
-    """
-    for parent in ast.walk(tree):
-        body = getattr(parent, "body", None)
-        if not isinstance(body, list):
-            continue
-        for node in body:
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                yield parent, node
+    def __init__(self, relative_path: str, lines: list[str]):
+        self.relative_path = relative_path
+        self.lines = lines
+        self.scope: list[tuple[str, str]] = []
+        self.classes: list[dict[str, Any]] = []
+        self.functions: list[dict[str, Any]] = []
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> Any:
+        self.classes.append(
+            {
+                "file": self.relative_path,
+                "name": node.name,
+                "qualified_name": self._qualified_name(node.name),
+                "owner": self._owner(),
+                "definition_scope": self._definition_scope(),
+                "bases": [_safe_unparse(base) for base in node.bases],
+                "decorators": [_safe_unparse(decorator) for decorator in node.decorator_list],
+                "line_start": node.lineno,
+                "line_end": node.end_lineno or node.lineno,
+                "methods": [
+                    child.name
+                    for child in node.body
+                    if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+                ],
+                "evidence": _node_evidence(self.relative_path, self.lines, node),
+            }
+        )
+        self.scope.append((node.name, "class"))
+        self.generic_visit(node)
+        self.scope.pop()
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> Any:
+        self._visit_function(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> Any:
+        self._visit_function(node)
+
+    def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        self.functions.append(
+            {
+                "file": self.relative_path,
+                "name": node.name,
+                "qualified_name": self._qualified_name(node.name),
+                "owner": self._owner(),
+                "definition_scope": self._definition_scope(),
+                "kind": "async_function" if isinstance(node, ast.AsyncFunctionDef) else "function",
+                "args": _function_args(node.args),
+                "decorators": [_safe_unparse(decorator) for decorator in node.decorator_list],
+                "line_start": node.lineno,
+                "line_end": node.end_lineno or node.lineno,
+                "evidence": _node_evidence(self.relative_path, self.lines, node),
+            }
+        )
+        self.scope.append((node.name, "function"))
+        self.generic_visit(node)
+        self.scope.pop()
+
+    def _qualified_name(self, name: str) -> str:
+        parts = [scope_name for scope_name, _kind in self.scope]
+        return ".".join([*parts, name])
+
+    def _owner(self) -> str:
+        return ".".join(name for name, _kind in self.scope) or "module"
+
+    def _definition_scope(self) -> str:
+        return self.scope[-1][1] if self.scope else "module"
 
 
 def _node_evidence(relative_path: str, lines: list[str], node: ast.AST) -> dict[str, Any]:

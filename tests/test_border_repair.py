@@ -1,5 +1,7 @@
 """Border repair loop: refuse → Dirty rewrite → re-gate."""
 
+import json
+
 from packages.agents.base_agent import StubTextClient
 from packages.agents.border_team import gate_with_repairs, scrub_failed_originals
 from packages.agents.border_team.repair_loop import failing_findings
@@ -31,6 +33,39 @@ def test_scrub_failed_originals_removes_makefile_style_leaks():
     scrubbed = scrub_failed_originals(text, findings, alias_map)
     assert "Makefile" not in scrubbed
     assert "build configuration" in scrubbed
+
+
+def test_scrub_failed_originals_preserves_identifiers_border_dismissed():
+    alias_map = AliasMap()
+    alias_map.component_alias("WidgetStore")
+    alias_map.component_alias("connect", kind="function")
+    text = "Applications connect to WidgetStore through a stable interface."
+    findings = [
+        {
+            "original": "WidgetStore",
+            "alias": alias_map.alias_for("WidgetStore"),
+            "kind": "identifier",
+            "decision": "fail",
+        }
+    ]
+
+    scrubbed = scrub_failed_originals(text, findings, alias_map)
+
+    assert "WidgetStore" not in scrubbed
+    assert "connect" in scrubbed
+    assert alias_map.alias_for("connect") not in scrubbed
+
+
+def test_scrub_failed_originals_removes_inline_dirty_advisories():
+    text = (
+        "# Specification\n\nUseful behavior.\n\n"
+        "BORDER-REVIEW: names were omitted from this paragraph.\n"
+    )
+
+    scrubbed = scrub_failed_originals(text, [], AliasMap())
+
+    assert "Useful behavior." in scrubbed
+    assert "BORDER-REVIEW" not in scrubbed
 
 
 def test_repair_loop_passes_after_deterministic_scrub(tmp_path):
@@ -140,13 +175,15 @@ def test_spec_repair_unwraps_document_json_envelope():
     alias_map = AliasMap()
     synthesizer = SpecSynthesizerAgent(
         model="stub/spec",
-        chat_client=StubTextClient(lambda prompt: '{"document":"# Specification\\n\\nClean."}'),
+        chat_client=StubTextClient(
+            lambda prompt: json.dumps({"document": CLEAN_SPEC})
+        ),
         alias_map=alias_map,
     )
 
     repaired = synthesizer.repair(CLEAN_SPEC, [], alias_map)
 
-    assert repaired == "# Specification\n\nClean."
+    assert repaired == CLEAN_SPEC.strip()
 
 
 def test_spec_repair_uses_scrubbed_fallback_for_unknown_json_envelope():
@@ -177,3 +214,42 @@ def test_failing_findings_only_lists_fails():
     failing = failing_findings(verdict)
     assert failing
     assert all(item["decision"] == "fail" for item in failing)
+
+
+def test_spec_repair_falls_back_when_model_drops_sections_and_evidence():
+    alias_map = _alias_map_with_widget()
+    leaked = CLEAN_SPEC + "\nThen call WidgetStore() to continue. Evidence: EV-999.\n"
+    findings = failing_findings(
+        evaluate_crossing_artifacts(alias_map=alias_map, specification=leaked)
+    )
+    synthesizer = SpecSynthesizerAgent(
+        model="stub/spec",
+        chat_client=StubTextClient(
+            ['{"document":"# Specification\\n\\nShort replacement."}']
+        ),
+        alias_map=alias_map,
+    )
+
+    repaired = synthesizer.repair(leaked, findings, alias_map)
+
+    assert "WidgetStore" not in repaired
+    assert "EV-999" in repaired
+    assert "## Project Purpose" in repaired
+
+
+def test_spec_repair_falls_back_when_model_writes_inline_border_marker():
+    alias_map = _alias_map_with_widget()
+    leaked = CLEAN_SPEC + "\nThen call WidgetStore() to continue.\n"
+    findings = failing_findings(
+        evaluate_crossing_artifacts(alias_map=alias_map, specification=leaked)
+    )
+    contaminated = CLEAN_SPEC + "\nBORDER-REVIEW: revisit wording.\n"
+    synthesizer = SpecSynthesizerAgent(
+        model="stub/spec",
+        chat_client=StubTextClient([json.dumps({"document": contaminated})]),
+        alias_map=alias_map,
+    )
+
+    repaired = synthesizer.repair(leaked, findings, alias_map)
+
+    assert "BORDER-REVIEW" not in repaired

@@ -20,8 +20,13 @@ from packages.agents.planning.prompts import PLANNER_INSTRUCTION
 from packages.agents.planning.utils.common import log_mini_tasks
 from packages.modules.border.corpus import evidence_excerpts
 from packages.modules.ingesting import SourceManifest
+from packages.modules.reconstruction_ir import build_planning_priority_batches
 from packages.modules.supervising import PlanningPolicy
-from packages.modules.supervising.verifiers.planning import OUTPUT_FIELDS_BY_STAGE
+from packages.modules.supervising.verifiers.planning import (
+    OUTPUT_FIELDS_BY_STAGE,
+    PlanSemanticError,
+    PlanVerifier,
+)
 
 log = logging.getLogger(__name__)
 
@@ -31,6 +36,7 @@ _STAGE_EVIDENCE_TYPES = {
     "behavior": frozenset({"code", "documentation"}),
     "specification": frozenset({"code", "documentation"}),
 }
+PLANNER_CATALOGUE_LIMIT = 80
 
 
 class PlanningAgent(BaseAgent):
@@ -47,6 +53,7 @@ class PlanningAgent(BaseAgent):
         code_index: dict[str, Any] | None = None,
         doc_index: dict[str, Any] | None = None,
         max_rounds: int = MAX_ROUNDS,
+        reconstruction_inventory: dict[str, Any] | None = None,
         **_legacy: Any,
     ) -> str:
         """Produce a plan for one stage, refined against a judge.
@@ -59,6 +66,12 @@ class PlanningAgent(BaseAgent):
         """
         log.info("Planning Agent stage -> %s", stage)
         catalogue = filter_evidence_catalogue(evidence_catalogue or [], stage)
+        priority_batches = build_planning_priority_batches(
+            reconstruction_inventory, catalogue, stage
+        )
+        priorities = priority_batches[0] if priority_batches else []
+        all_priorities = [item for batch in priority_batches for item in batch]
+        visible_catalogue = _bounded_planner_catalogue(catalogue, priorities)
         fields = tuple(allowed_output_fields or OUTPUT_FIELDS_BY_STAGE.get(stage, ()))
         source_texts = _stage_source_texts(stage, code_index, doc_index)
         if not catalogue:
@@ -71,16 +84,18 @@ class PlanningAgent(BaseAgent):
             return self.run(
                 task_instruction=build_task_instruction(
                     stage=stage,
-                    evidence_catalogue=catalogue,
+                    evidence_catalogue=visible_catalogue,
                     allowed_output_fields=fields,
                     feedback=feedback,
+                    reconstruction_priorities=priorities,
                 ),
                 agent_name=f"Planning Agent [{stage}]",
                 supervisor_policy=PlanningPolicy(alias_map=self.alias_map),
                 supervisor_context={
                     "stage": stage,
                     "alias_map": self.alias_map,
-                    "evidence_catalogue": catalogue,
+                    "evidence_catalogue": visible_catalogue,
+                    "reconstruction_priorities": priorities,
                 },
                 repo_local_path=source_manifest.repo_local_path,
                 recorder_scope="planner",
@@ -100,7 +115,9 @@ class PlanningAgent(BaseAgent):
             return judgement
 
         if self.alias_map is None:
-            plan_text = draft([])
+            plan_text = _complete_priority_plan(
+                draft([]), stage, priority_batches[1:], catalogue, all_priorities, None
+            )
             _log_plan(plan_text, stage)
             return plan_text
 
@@ -116,6 +133,14 @@ class PlanningAgent(BaseAgent):
                     stage,
                     len(leaks),
                 )
+            plan_text = _complete_priority_plan(
+                plan_text,
+                stage,
+                priority_batches[1:],
+                catalogue,
+                all_priorities,
+                self.alias_map,
+            )
             _log_plan(plan_text, stage)
             return plan_text
 
@@ -131,8 +156,105 @@ class PlanningAgent(BaseAgent):
         if outcome.degraded:
             for note in outcome.border_review:
                 log.error("%s", note)
-        _log_plan(outcome.plan, stage)
-        return outcome.plan
+        plan_text = _complete_priority_plan(
+            outcome.plan,
+            stage,
+            priority_batches[1:],
+            catalogue,
+            all_priorities,
+            self.alias_map,
+        )
+        _log_plan(plan_text, stage)
+        return plan_text
+
+
+def _bounded_planner_catalogue(
+    catalogue: list[dict[str, Any]],
+    priorities: list[dict[str, Any]],
+    limit: int = PLANNER_CATALOGUE_LIMIT,
+) -> list[dict[str, Any]]:
+    """Keep the prompt bounded while always retaining its required priority ids."""
+    required_ids = {
+        item.get("evidence_id") for item in priorities if isinstance(item, dict)
+    }
+    required = [item for item in catalogue if item.get("evidence_id") in required_ids]
+    supporting = [item for item in catalogue if item.get("evidence_id") not in required_ids]
+    return [*required, *supporting[: max(0, limit - len(required))]]
+
+
+def _complete_priority_plan(
+    plan_text: str,
+    stage: str,
+    overflow_batches: list[list[dict[str, Any]]],
+    catalogue: list[dict[str, Any]],
+    all_priorities: list[dict[str, Any]],
+    alias_map: Any | None,
+) -> str:
+    """Append neutral controller-owned tasks for priorities outside the LLM window."""
+    payload = json.loads(plan_text)
+    tasks = payload.setdefault("mini_tasks", [])
+    excused = payload.get("not_applicable") or []
+    generated_fields: set[str] = set()
+
+    for batch_number, batch in enumerate(overflow_batches, start=2):
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for priority in batch:
+            eligible = [
+                field
+                for field in priority.get("required_output_fields", [])
+                if field in OUTPUT_FIELDS_BY_STAGE.get(stage, frozenset())
+            ]
+            if not eligible:
+                raise ValueError(
+                    f"Priority {priority.get('evidence_id')} has no eligible output field "
+                    f"for stage {stage!r}"
+                )
+            grouped.setdefault(eligible[0], []).append(priority)
+
+        for group_number, (output_field, priorities) in enumerate(
+            sorted(grouped.items()), start=1
+        ):
+            generated_fields.add(output_field)
+            tasks.append(
+                {
+                    "task_id": (
+                        f"{stage[:4].upper()}-OVERFLOW-{batch_number:03d}-{group_number:02d}"
+                    ),
+                    "task_type": "extract_required_reconstruction_contracts",
+                    "output_field": output_field,
+                    "input_refs": [
+                        {
+                            "source": "reconstruction_priority",
+                            "evidence_id": priority["evidence_id"],
+                        }
+                        for priority in priorities
+                    ],
+                    "requirements": [
+                        "Extract one distinct, evidence-grounded reconstruction contract "
+                        "for every required reference; do not merge or omit contracts."
+                    ],
+                    "min_items": len(priorities),
+                }
+            )
+
+    if generated_fields:
+        payload["not_applicable"] = [
+            item
+            for item in excused
+            if not isinstance(item, dict) or item.get("output_field") not in generated_fields
+        ]
+
+    completed = json.dumps(payload, ensure_ascii=False, indent=2)
+    verification = PlanVerifier(alias_map=alias_map).verify(
+        completed,
+        stage,
+        alias_map=alias_map,
+        evidence_catalogue=catalogue,
+        reconstruction_priorities=all_priorities,
+    )
+    if not verification["valid"]:
+        raise PlanSemanticError(stage, verification["issues"], completed)
+    return completed
 
 
 def build_task_instruction(
@@ -140,6 +262,7 @@ def build_task_instruction(
     evidence_catalogue: list[dict[str, str]],
     allowed_output_fields: tuple[str, ...] | list[str],
     feedback: list[str] | None = None,
+    reconstruction_priorities: list[dict[str, Any]] | None = None,
 ) -> str:
     """The planner's user prompt: what to plan, what it may cite, what to fix.
 
@@ -160,6 +283,9 @@ def build_task_instruction(
         if feedback
         else "- (first attempt; no feedback yet)"
     )
+    priorities_block = json.dumps(
+        reconstruction_priorities or [], ensure_ascii=False, indent=2
+    )
 
     return f"""
 <stage>
@@ -174,6 +300,10 @@ def build_task_instruction(
 {catalogue_lines}
 </evidence_catalogue>
 
+<reconstruction_priorities>
+{priorities_block}
+</reconstruction_priorities>
+
 <feedback_on_your_previous_attempt>
 {feedback_block}
 </feedback_on_your_previous_attempt>
@@ -181,6 +311,14 @@ def build_task_instruction(
 Decide how many tasks each allowed output field deserves - several for what the rebuilding
 team cannot guess, one for the ordinary, none where nothing is hard to reproduce. Then write
 those tasks, citing only evidence ids from the catalogue above.
+
+Every entry in reconstruction_priorities with required=true MUST be cited by at least one
+mini task whose output_field appears in that entry's required_output_fields. Group related
+references in one task when appropriate, but set min_items to at least the number of required
+priority references assigned to that task. Set source="reconstruction_priority" on those
+required input_refs; use source="evidence_catalogue" for ordinary supporting references.
+A behavioral_evidence entry describes behavior to extract; it is evidence and must not be
+proposed as output code.
 
 If feedback is present, address it directly: it comes from a reviewer who can see material
 you cannot.

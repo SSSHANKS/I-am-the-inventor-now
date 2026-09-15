@@ -37,6 +37,7 @@ class PlanningPolicy(BaseSupervisorPolicy):
             stage=self._stage(context),
             alias_map=context.get("alias_map") or self.alias_map,
             evidence_catalogue=context.get("evidence_catalogue"),
+            reconstruction_priorities=context.get("reconstruction_priorities"),
         )
 
     def build_schema_repair_prompt(self, errors: dict[str, Any], context: dict[str, Any]) -> str:

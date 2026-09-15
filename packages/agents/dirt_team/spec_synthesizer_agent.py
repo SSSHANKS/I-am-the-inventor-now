@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 from typing import Any
 
 from packages.agents.base_agent import (
@@ -8,6 +9,7 @@ from packages.agents.base_agent import (
 from packages.agents.planning import format_mini_tasks, iter_mini_tasks, log_mini_tasks
 from packages.modules.border import evidence_excerpts
 from packages.modules.boundary import (
+    BORDER_REVIEW,
     AliasMap,
     annotate_border_review,
     neutral_report,
@@ -132,7 +134,9 @@ cross.
 
 [Task]
 - Rewrite the specification so every failed finding is gone.
-- Prefer neutral role language ("the build configuration", "Component A", "Operation E").
+- Rewrite flagged names as natural role descriptions that fit each sentence grammatically.
+  Do not mechanically substitute opaque Component/Operation labels when a plain description
+  such as "event channel", "listener", "origin", or another context-appropriate role is clear.
 - Keep the same section structure, evidence ids (EV-###), and behavioural content.
 - Do not invent new behaviour, APIs, or requirements.
 - Do not mention Border, repair, or the words that were flagged as leaks.
@@ -365,7 +369,7 @@ class SpecSynthesizerAgent(BaseAgent):
 
 
 def _normalise_repaired_markdown(content: str, *, fallback: str) -> str:
-    """Normalize a model repair, falling back to the deterministic scrub if malformed."""
+    """Normalize a repair, falling back when it loses structure or useful detail."""
     candidate = content.strip()
     try:
         payload = json.loads(candidate)
@@ -386,7 +390,7 @@ def _normalise_repaired_markdown(content: str, *, fallback: str) -> str:
     elif payload is not None:
         candidate = ""
 
-    if candidate.startswith("# "):
+    if candidate.startswith("# ") and _repair_preserves_contract(candidate, fallback):
         return candidate
 
     fallback_markdown = fallback.strip()
@@ -397,6 +401,26 @@ def _normalise_repaired_markdown(content: str, *, fallback: str) -> str:
         "scrubbed specification"
     )
     return fallback_markdown
+
+
+def _repair_preserves_contract(candidate: str, source: str) -> bool:
+    """Reject lossy rewrites deterministically without spending another model call."""
+    if BORDER_REVIEW in candidate:
+        return False
+
+    source_headings = set(re.findall(r"(?m)^#{1,6}\s+.+$", source))
+    candidate_headings = set(re.findall(r"(?m)^#{1,6}\s+.+$", candidate))
+    if not source_headings <= candidate_headings:
+        return False
+
+    source_evidence = set(re.findall(r"\bEV-\d{3,}\b", source))
+    candidate_evidence = set(re.findall(r"\bEV-\d{3,}\b", candidate))
+    if not source_evidence <= candidate_evidence:
+        return False
+
+    source_words = re.findall(r"\b\w+\b", source)
+    candidate_words = re.findall(r"\b\w+\b", candidate)
+    return len(candidate_words) >= max(1, int(len(source_words) * 0.75))
 
 
 def _neutral(

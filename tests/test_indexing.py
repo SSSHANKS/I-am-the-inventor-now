@@ -17,6 +17,11 @@ def test_code_index_finds_the_structure(reader, manifest):
     assert "build_store" in {f["qualified_name"] for f in index["functions"]}
     assert "WidgetStore.load" in {f["qualified_name"] for f in index["functions"]}
 
+    module = next(item for item in index["modules"] if item["file"] == "src/store.py")
+    assert module["line_count"] > 0
+    assert module["evidence"]["line_start"] == 1
+    assert module["evidence"]["line_end"] <= 80
+
 
 def test_python_definition_evidence_includes_the_body():
     from packages.modules.indexing.python_file import index_python_source
@@ -37,6 +42,53 @@ def test_python_definition_evidence_includes_the_body():
     assert evidence_item["line_start"] == 1
     assert evidence_item["line_end"] == 3
     assert "return adjusted" in evidence_item["excerpt"]
+
+
+def test_python_definitions_keep_complete_lexical_ownership():
+    from packages.modules.indexing.python_file import index_python_source
+
+    content = """class Signal:
+    def connect(self):
+        def cleanup():
+            return None
+        return cleanup
+
+def factory():
+    class LocalAdapter:
+        pass
+    return LocalAdapter()
+
+class Namespace:
+    class NamedSignal:
+        def send(self):
+            return None
+"""
+    result = {
+        "files_indexed": [],
+        "imports": [],
+        "classes": [],
+        "functions": [],
+        "entrypoints": [],
+        "calls": [],
+        "analysis_targets": [],
+    }
+    index_python_source("src/signals.py", result, content, content.splitlines())
+
+    functions = {item["qualified_name"]: item for item in result["functions"]}
+    assert functions["Signal.connect"]["definition_scope"] == "class"
+    assert functions["Signal.connect.cleanup"]["owner"] == "Signal.connect"
+    assert functions["Signal.connect.cleanup"]["definition_scope"] == "function"
+    assert functions["Namespace.NamedSignal.send"]["owner"] == "Namespace.NamedSignal"
+    assert functions["factory"]["definition_scope"] == "module"
+
+    classes = {item["qualified_name"]: item for item in result["classes"]}
+    assert classes["factory.LocalAdapter"]["definition_scope"] == "function"
+    assert classes["Namespace.NamedSignal"]["definition_scope"] == "class"
+
+    targets = {item["target"] for item in result["analysis_targets"]}
+    assert {"Signal", "factory", "Namespace", "Namespace.NamedSignal"} <= targets
+    assert "Signal.connect.cleanup" not in targets
+    assert "factory.LocalAdapter" not in targets
 
 
 def test_a_ternary_or_lambda_no_longer_aborts_the_file(reader, manifest):
@@ -83,6 +135,13 @@ def test_classified_code_languages_are_indexed_not_skipped(reader, manifest):
         "Dockerfile",
     } <= indexed
 
+    modules = {item["file"] for item in index["modules"]}
+    assert {"config.json", "pyproject.toml", "Dockerfile"}.isdisjoint(modules)
+    assert {"src/store.py", "src/view.js"} <= modules
+    # Notebooks intentionally keep their file-level contract as configuration
+    # evidence while their code cells contribute classes and functions below.
+    assert "analysis.ipynb" not in modules
+
     class_names = {item["name"] for item in index["classes"]}
     assert {"WidgetStore", "WidgetView", "WidgetService", "WidgetBox", "NotebookStore"} <= class_names
 
@@ -126,7 +185,7 @@ def test_doc_index_finds_sections_and_commands(reader, manifest):
 
 def test_every_indexed_item_carries_locatable_evidence(reader, manifest):
     index = SourceCodeIndexer(reader).index(manifest)
-    for item in index["classes"] + index["functions"]:
+    for item in index["modules"] + index["classes"] + index["functions"]:
         ev = item["evidence"]
         assert ev["file"] and ev["line_start"] >= 1
         assert ev["line_end"] >= ev["line_start"]
@@ -142,4 +201,5 @@ def test_prompt_context_trims_the_index(reader, manifest):
     index = SourceCodeIndexer(reader).index(manifest)
     context = build_source_code_index_context(index, limit=1)
     assert len(context["classes"]) <= 1
+    assert len(context["modules"]) <= 1
     assert "calls" not in context  # not useful in a prompt, and large

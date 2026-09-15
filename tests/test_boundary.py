@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 from packages.modules.boundary import (
     AliasMap,
     annotate_border_review,
@@ -628,6 +630,76 @@ def test_production_code_is_catalogued_before_examples():
 
     assert entries[0]["source_role"] == "production source"
     assert entries[-1]["source_role"] == "example source"
+
+
+def test_source_modules_receive_citable_evidence():
+    from packages.modules.boundary import build_evidence_catalogue, mint_evidence_ids
+
+    alias_map = AliasMap(project_name="PROJECT-X")
+    index = {
+        "modules": [
+            {
+                "file": "src/product/__init__.py",
+                "kind": "source_module",
+                "line_count": 2,
+                "evidence": {
+                    "file": "src/product/__init__.py",
+                    "line_start": 1,
+                    "line_end": 2,
+                },
+            }
+        ]
+    }
+
+    mint_evidence_ids(alias_map, index)
+    entries = build_evidence_catalogue(alias_map, index, None)["entries"]
+
+    assert len(entries) == 1
+    assert entries[0]["kind"] == "a source module"
+    assert entries[0]["evidence_id"].startswith("EV-")
+
+
+def test_required_reconstruction_evidence_bypasses_catalogue_sampling_limit():
+    from packages.modules.boundary import build_evidence_catalogue, mint_evidence_ids
+
+    alias_map = AliasMap(project_name="PROJECT-X")
+    functions = [
+        {
+            "name": f"operation_{index}",
+            "evidence": {
+                "file": f"src/component_{index}.py",
+                "line_start": 1,
+                "line_end": 2,
+            },
+        }
+        for index in range(5)
+    ]
+    index = {"functions": functions}
+    mint_evidence_ids(alias_map, index)
+    required_id = alias_map.evidence_id("src/component_4.py", 1, 2)
+
+    entries = build_evidence_catalogue(
+        alias_map,
+        index,
+        None,
+        limit_per_collection=2,
+        required_evidence_ids={required_id},
+    )["entries"]
+
+    assert len(entries) == 3
+    assert required_id in {entry["evidence_id"] for entry in entries}
+
+
+def test_missing_required_reconstruction_evidence_is_rejected():
+    from packages.modules.boundary import build_evidence_catalogue
+
+    with pytest.raises(ValueError, match="EV-999"):
+        build_evidence_catalogue(
+            AliasMap(project_name="PROJECT-X"),
+            {},
+            {},
+            required_evidence_ids={"EV-999"},
+        )
 
 
 def test_a_known_original_label_is_still_rejected():

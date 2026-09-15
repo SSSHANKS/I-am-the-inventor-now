@@ -1,0 +1,18 @@
+# Multi-Module Catalog
+
+## Functional Requirements
+
+- FR-001: Normalize a name by removing surrounding whitespace and applying case-insensitive normalization.
+- FR-002: Determine whether a candidate name is present by comparing normalized stored names.
+
+## Behavioral Requirements
+
+- BR-001: Membership checks ignore surrounding whitespace and letter case in both stored names and the candidate.
+
+## Acceptance Criteria
+
+- AC-001: A candidate with different case and surrounding whitespace matches the corresponding stored name.
+
+## Test Candidates
+
+- TC-001: Verify normalization independently and membership through the public package interface.
