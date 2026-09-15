@@ -128,9 +128,10 @@ Derive an exact project file manifest from the validated architecture. Architect
 authoritative: do not add capabilities, requirements, components, contracts, entry
 points, dependencies, or public decisions. Assign every file to exactly one component
 and use safe canonical POSIX relative paths. Categorize files as source, metadata,
-configuration, documentation, or asset. Do not generate or plan project test files;
-TC scenarios have already shaped the architecture and must not appear as file
-requirements.
+configuration, documentation, or asset. Do not generate or plan model-authored project
+test files. TC scenarios have already shaped the architecture and must not appear as
+manifest file requirements. A runtime adapter may publish validated behavior probes as
+tests after this manifest is complete.
 
 The request includes `manifest_constraints`. A file may claim only requirement IDs and
 provide only contract IDs listed for its selected component. Cross-component consumers
@@ -149,7 +150,7 @@ deterministically; use `model` otherwise. Give every file at least one local val
 supported by the policy and list applicable component integration checks. Define typed
 project-readiness obligations, including one required manifest-integrity obligation
 covering all files. Do not claim that generated tests or network installation will be
-available. Echo the supplied architecture SHA-256 exactly.
+available during manifest design. Echo the supplied architecture SHA-256 exactly.
 
 [Output]
 Return only JSON with exactly this shape (all fields required):

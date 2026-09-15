@@ -1570,6 +1570,15 @@ def test_project_first_behavior_failure_repairs_production_with_frozen_probe(tmp
         )
     ) == probes
     assert result.report["behavior_probe_sha256"]
+    published_test = result.project_root / "tests/test_reconstruction_behavior.py"
+    assert published_test.is_file()
+    assert "test_probe_001_fr_001" in published_test.read_text(encoding="utf-8")
+    published = json.loads(
+        (result.output_root / "_clean/published_tests.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert published["files"][0]["path"] == "tests/test_reconstruction_behavior.py"
     behavior = next(
         item
         for item in result.report["checks"]

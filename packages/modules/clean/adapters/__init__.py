@@ -20,6 +20,7 @@ def project_first_planning_policy(*, syntax_checks: bool) -> dict[str, Any]:
     return {
         "schema_version": 1,
         "generated_tests": False,
+        "adapter_published_behavior_tests": True,
         "network_installation": False,
         "executable_validation": False,
         "adapters": list(adapters),

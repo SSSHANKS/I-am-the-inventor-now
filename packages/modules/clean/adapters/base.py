@@ -42,6 +42,13 @@ class RuntimeAdapter(Protocol):
         manifest: dict[str, Any],
     ) -> str: ...
 
+    def materialise_behavior_tests(
+        self,
+        architecture: dict[str, Any],
+        manifest: dict[str, Any],
+        behavior_suite: dict[str, Any] | None,
+    ) -> list[dict[str, Any]]: ...
+
     def validate_manifest(
         self,
         architecture: dict[str, Any],

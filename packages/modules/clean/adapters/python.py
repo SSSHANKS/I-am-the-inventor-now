@@ -13,6 +13,7 @@ from packages.modules.clean.adapters.python_packaging import (
     python_manifest_readiness_issues,
     validate_python_packaging,
 )
+from packages.modules.clean.adapters.python_tests import materialise_python_behavior_tests
 from packages.modules.clean.manifest import normalise_manifest
 from packages.modules.clean.python_contract_paths import python_contract_module
 from packages.modules.clean.validation import validate_project
@@ -134,6 +135,7 @@ class PythonRuntimeAdapter:
             "readiness_ceiling": "syntax" if syntax_checks else "structure",
             "available_checks": sorted(validators),
             "adapter_file_generation": False,
+            "behavior_test_publication": True,
         }
 
     def normalise_manifest(
@@ -295,6 +297,15 @@ class PythonRuntimeAdapter:
             flags=re.MULTILINE,
         )
         return _postpone_unsafe_callable_unions(normalised)
+
+    def materialise_behavior_tests(
+        self,
+        architecture: dict[str, Any],
+        manifest: dict[str, Any],
+        behavior_suite: dict[str, Any] | None,
+    ) -> list[dict[str, Any]]:
+        del architecture, manifest
+        return materialise_python_behavior_tests(behavior_suite)
 
     def validate_manifest(
         self,

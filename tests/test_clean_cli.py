@@ -38,7 +38,7 @@ def test_clean_cli_refuses_dirty_run_directory(tmp_path):
     assert main([str(dirty), "--output", str(tmp_path / "output"), "--stub"]) == 2
 
 
-def test_clean_cli_project_first_reaches_readiness_without_generated_tests(tmp_path):
+def test_clean_cli_project_first_publishes_validated_behavior_tests(tmp_path):
     handoff = export_clean_handoff(
         tmp_path / "handoff",
         "# Stub Project\n\n## Requirements\n\n- FR-001: Provide an entry point.\n",
@@ -59,7 +59,9 @@ def test_clean_cli_project_first_reaches_readiness_without_generated_tests(tmp_p
     )
 
     assert exit_code == 0
-    assert not (output / "project" / "tests").exists()
+    published_test = output / "project" / "tests/test_reconstruction_behavior.py"
+    assert published_test.is_file()
+    assert "test_probe_001_fr_001" in published_test.read_text(encoding="utf-8")
     report = json.loads(
         (output / "_clean" / "clean_build_report.json").read_text(encoding="utf-8")
     )

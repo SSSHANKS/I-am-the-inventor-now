@@ -57,8 +57,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help=(
             "opt in to configured executable readiness checks; generated project "
-            "tests are not created; ephemeral behavior probes are executed in disposable "
-            "copies; child processes are restricted but are not an OS security sandbox"
+            "code and immutable behavior probes are executed in disposable copies; "
+            "supported runtime adapters also publish those validated probes as project "
+            "tests; child processes are restricted but are not an OS security sandbox"
         ),
     )
     parser.add_argument(

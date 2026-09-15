@@ -159,6 +159,7 @@ class CleanRunner:
         runtime_adapter: RuntimeAdapter | None = None
         behavior_suite: dict[str, Any] | None = None
         behavior_probe_design_failure: str | None = None
+        adapter_generated_files: list[dict[str, Any]] = []
         validation_policy: dict[str, Any]
         try:
             prepared_specification = prepare_specification(handoff.specification)
@@ -180,6 +181,10 @@ class CleanRunner:
                     validation_policy=validation_policy,
                 )
                 plan = _compatibility_plan(architecture, manifest)
+                adapter_generated_files = runtime_adapter.materialise_behavior_tests(
+                    architecture, manifest, behavior_suite
+                )
+                _append_adapter_generated_tests(plan, adapter_generated_files)
                 self._validate_plan(
                     plan,
                     prepared_specification.text,
@@ -237,14 +242,48 @@ class CleanRunner:
             workspace.write_metadata_json("manifest.json", manifest)
         if behavior_suite is not None:
             workspace.write_metadata_json("behavior_probes.json", behavior_suite)
+        if adapter_generated_files:
+            workspace.write_metadata_json(
+                "published_tests.json",
+                {
+                    "schema_version": 1,
+                    "files": [
+                        {
+                            "path": item["path"],
+                            "sha256": hashlib.sha256(
+                                item["content"].encode("utf-8")
+                            ).hexdigest(),
+                            "requirement_ids": item["requirement_ids"],
+                            "scenario_ids": item.get("scenario_ids", []),
+                        }
+                        for item in adapter_generated_files
+                    ],
+                },
+            )
         if project_first:
             workspace.write_metadata_json("adapter_policy.json", validation_policy)
         workspace.write_metadata_json("clean_plan.json", plan)
         plan_hash = _json_hash(plan)
         generation_failures: list[dict[str, Any]] = []
+        adapter_files_by_path = {
+            item["path"]: item for item in adapter_generated_files
+        }
         for task in sorted(plan["files"], key=lambda item: item["generation_order"]):
             path = task["path"]
             try:
+                if path in adapter_files_by_path:
+                    workspace.write_metadata_json(
+                        f"generation/{task['generation_order']:03d}.json",
+                        {
+                            "path": path,
+                            "dependency_paths": list(task["depends_on"]),
+                            "generation_owner": "adapter",
+                        },
+                    )
+                    workspace.write_generated_files(
+                        [adapter_files_by_path[path]], allowed_paths={path}
+                    )
+                    continue
                 scoped_context = build_scoped_context(
                     prepared_specification.text,
                     plan,
@@ -1395,6 +1434,46 @@ def _compatibility_plan(
         ],
         "open_questions": list(architecture["unresolved_gaps"]),
     }
+
+
+def _append_adapter_generated_tests(
+    plan: dict[str, Any],
+    generated_files: list[dict[str, Any]],
+) -> None:
+    """Append deterministic runtime tests after all model-owned project files."""
+    if not generated_files:
+        return
+    existing_paths = [item["path"] for item in plan["files"]]
+    existing = set(existing_paths)
+    next_order = max(
+        (item["generation_order"] for item in plan["files"]), default=0
+    ) + 1
+    for generated in generated_files:
+        path = validate_relative_path(str(generated["path"]))
+        if path in existing:
+            raise WorkspaceError(
+                f"Adapter-generated test collides with planned path {path!r}"
+            )
+        requirement_ids = list(dict.fromkeys(generated["requirement_ids"]))
+        plan["files"].append(
+            {
+                "path": path,
+                "purpose": (
+                    "Execute validated clean-room behavior probes as project tests."
+                ),
+                "requirement_ids": requirement_ids,
+                "provides": [],
+                "requires": [],
+                "depends_on": list(existing_paths),
+                "generation_order": next_order,
+                "scenario_ids": list(
+                    dict.fromkeys(generated.get("scenario_ids", []))
+                ),
+            }
+        )
+        existing.add(path)
+        existing_paths.append(path)
+        next_order += 1
 
 
 def _normalise_plan(

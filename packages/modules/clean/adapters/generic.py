@@ -29,6 +29,7 @@ class GenericRuntimeAdapter:
             "readiness_ceiling": "structure",
             "available_checks": sorted(self._validators),
             "adapter_file_generation": False,
+            "behavior_test_publication": False,
         }
 
     def normalise_manifest(
@@ -49,6 +50,16 @@ class GenericRuntimeAdapter:
     ) -> str:
         del path, architecture, manifest
         return content
+
+    def materialise_behavior_tests(
+        self,
+        architecture: dict[str, Any],
+        manifest: dict[str, Any],
+        behavior_suite: dict[str, Any] | None,
+    ) -> list[dict[str, Any]]:
+        """Leave test publication to a runtime-specific adapter."""
+        del architecture, manifest, behavior_suite
+        return []
 
     def validate_manifest(
         self,
