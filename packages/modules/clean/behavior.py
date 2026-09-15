@@ -359,6 +359,10 @@ def _validate_probe_semantics(
             "behavior explicitly stated by the architecture"
         )
 
+    _reject_disposable_weak_callbacks(probe["probe_id"], tree)
+    _validate_initialization_probe_focus(probe["probe_id"], tree, own_text)
+    _validate_lifecycle_observer_path(probe["probe_id"], tree, own_text)
+
     async_names = {
         node.name for node in tree.body if isinstance(node, ast.AsyncFunctionDef)
     }
@@ -411,6 +415,79 @@ def _is_sync_async_error_rule(text: str) -> bool:
         any(term in folded for term in ("synchronous", "sync ", "sync dispatch"))
         and any(term in folded for term in ("asynchronous", "async", "coroutine"))
         and any(term in folded for term in ("error", "raise", "reject", "runtimeerror"))
+    )
+
+
+def _reject_disposable_weak_callbacks(probe_id: str, tree: ast.Module) -> None:
+    registration_terms = {"add", "attach", "bind", "connect", "register", "subscribe"}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if _call_name(node.func).rsplit(".", 1)[-1].casefold() not in registration_terms:
+            continue
+        weak_is_false = any(
+            keyword.arg == "weak"
+            and isinstance(keyword.value, ast.Constant)
+            and keyword.value.value is False
+            for keyword in node.keywords
+        )
+        if not weak_is_false and any(isinstance(argument, ast.Lambda) for argument in node.args):
+            raise BehaviorProbeError(
+                f"Probe {probe_id} registers a disposable lambda through a potentially "
+                "weak connection; retain a named callback or request strong ownership"
+            )
+
+
+def _validate_initialization_probe_focus(
+    probe_id: str,
+    tree: ast.Module,
+    own_text: str,
+) -> None:
+    initialization_terms = ("initializ", "initial state", "bookkeeping structure")
+    if not any(term in own_text for term in initialization_terms):
+        return
+    assertions = _executed_assertions(tree)
+    if any(any(isinstance(node, ast.Attribute) for node in ast.walk(item.test)) for item in assertions):
+        return
+    raise BehaviorProbeError(
+        f"Probe {probe_id} is assigned to an initialization requirement but does not "
+        "assert initialized state"
+    )
+
+
+def _validate_lifecycle_observer_path(
+    probe_id: str,
+    tree: ast.Module,
+    own_text: str,
+) -> None:
+    lifecycle_terms = ("lifecycle", "observer", "tracking notification", "notification event")
+    if not any(term in own_text for term in lifecycle_terms):
+        return
+    registration_receivers = {
+        _call_name(node.func.value)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and any(term in node.func.attr.casefold() for term in ("observer", "lifecycle"))
+        and any(term in node.func.attr.casefold() for term in ("add", "attach", "connect", "register", "subscribe"))
+    }
+    if not registration_receivers:
+        return
+    producer_terms = {"connect", "disconnect", "emit", "invoke", "notify", "publish", "send"}
+    producer_receivers = {
+        _call_name(node.func.value)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr.casefold() in producer_terms
+    }
+    if registration_receivers & producer_receivers:
+        return
+    if any(term in own_text for term in ("global", "shared registry", "singleton")):
+        return
+    raise BehaviorProbeError(
+        f"Probe {probe_id} registers a disconnected lifecycle observer; register through "
+        "the producing object or an explicitly shared public observer channel"
     )
 
 

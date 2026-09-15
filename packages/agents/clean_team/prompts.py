@@ -410,7 +410,9 @@ the observable relation it actually states. Do not turn illustrative names in th
 architecture into behavioral facts.
 
 Keep probes focused on their one requirement. It cannot claim requirements or TC
-scenarios owned by another capability. Prefer deterministic values and explicit assertions. Temporary resources
+scenarios owned by another capability. A probe assigned to initialization must assert
+the initialized state described by that requirement; unrelated dispatch behavior does
+not prove initialization. Prefer deterministic values and explicit assertions. Temporary resources
 must be created with `tempfile` and cleaned up by the probe.
 
 [Output]

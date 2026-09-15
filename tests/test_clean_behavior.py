@@ -426,6 +426,65 @@ def test_general_result_probe_cannot_contradict_sync_async_error_rule():
         validate_behavior_probe_suite(_suite(code), architecture, require_complete=False)
 
 
+def test_disposable_lambda_cannot_be_registered_through_default_weak_connection():
+    code = (
+        "from greeting import greeting\n"
+        "greeting.connect(lambda value: value)\n"
+        "assert greeting() == 'hello'\n"
+    )
+
+    with pytest.raises(BehaviorProbeError, match="disposable lambda"):
+        validate_behavior_probe_suite(_suite(code), _architecture())
+
+
+def test_initialization_requirement_must_assert_initialized_state():
+    architecture = _architecture()
+    architecture["contracts"][0]["behavior_rules"] = [{
+        "aspect": "state",
+        "statement": "The object initializes an optional documentation attribute.",
+        "requirement_ids": ["FR-001"],
+        "source": "specification",
+        "evidence": [{
+            "requirement_id": "FR-001",
+            "excerpt": "initializes an optional documentation attribute",
+        }],
+    }]
+    code = (
+        "from greeting import greeting\n"
+        "result = greeting()\n"
+        "assert result == 'hello'\n"
+    )
+
+    with pytest.raises(BehaviorProbeError, match="initialization requirement"):
+        validate_behavior_probe_suite(_suite(code), architecture)
+
+
+def test_lifecycle_probe_must_register_observer_on_connected_public_channel():
+    architecture = _architecture()
+    architecture["contracts"][0]["behavior_rules"] = [{
+        "aspect": "state",
+        "statement": "Connection emits a lifecycle event to registered observers.",
+        "requirement_ids": ["FR-001"],
+        "source": "specification",
+        "evidence": [{
+            "requirement_id": "FR-001",
+            "excerpt": "emits a lifecycle event to registered observers",
+        }],
+    }]
+    code = (
+        "from greeting import Greeter, ObserverRegistry\n"
+        "registry = ObserverRegistry()\n"
+        "emitter = Greeter()\n"
+        "events = []\n"
+        "registry.add_lifecycle_observer(events.append)\n"
+        "emitter.connect(strong_handler, weak=False)\n"
+        "assert len(events) == 1\n"
+    )
+
+    with pytest.raises(BehaviorProbeError, match="disconnected lifecycle observer"):
+        validate_behavior_probe_suite(_suite(code), architecture)
+
+
 def test_exception_failure_guard_remains_valid(tmp_path):
     workspace = CleanWorkspace(tmp_path / 'output')
     workspace.write_generated_file('greeting.py', 'def greeting():\n    raise ValueError("invalid")\n')

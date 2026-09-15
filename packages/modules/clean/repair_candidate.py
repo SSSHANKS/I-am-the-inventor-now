@@ -126,15 +126,21 @@ def select_non_regressing_repair_subset(
     before_checks: list[dict[str, Any]],
     validator: Callable[[CleanWorkspace], list[dict[str, Any]]],
 ) -> tuple[list[dict[str, str]], list[dict[str, Any]] | None]:
-    """Greedily retain independently safe progress from a rejected batch.
+    """Retain independent or correlated safe progress from a rejected batch.
 
-    Every accepted prefix is revalidated as one transaction against the unchanged
-    workspace. This is deliberately linear rather than an exponential subset search.
+    First try each maximal batch formed by omitting one file. This preserves fixes
+    that are only valid together (for example, an implementation and its collaborator).
+    Fall back to individual files without performing an exponential subset search.
     """
-    accepted: list[dict[str, str]] = []
-    accepted_checks: list[dict[str, Any]] | None = None
-    for replacement in sorted(replacements, key=lambda item: item["path"]):
-        trial = [*accepted, replacement]
+    ordered = sorted(replacements, key=lambda item: item["path"])
+    trials = []
+    if len(ordered) > 2:
+        trials.extend(
+            [item for item_index, item in enumerate(ordered) if item_index != omitted]
+            for omitted in range(len(ordered))
+        )
+    trials.extend([[item] for item in ordered])
+    for trial in trials:
         checks, regressions = evaluate_repair_candidate(
             workspace,
             trial,
@@ -142,8 +148,6 @@ def select_non_regressing_repair_subset(
             before_checks,
             validator,
         )
-        if regressions:
-            continue
-        accepted = trial
-        accepted_checks = checks
-    return accepted, accepted_checks
+        if not regressions:
+            return trial, checks
+    return [], None

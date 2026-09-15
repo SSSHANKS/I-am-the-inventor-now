@@ -149,6 +149,41 @@ def test_safe_file_is_retained_from_a_mixed_repair_batch(tmp_path):
     assert workspace.read_generated_file("good.py") == "wrong"
 
 
+def test_correlated_safe_files_are_retained_from_a_mixed_repair_batch(tmp_path):
+    workspace = CleanWorkspace(tmp_path / "output")
+    workspace.write_generated_files([
+        {"path": "api.py", "content": "old-api"},
+        {"path": "model.py", "content": "old-model"},
+        {"path": "unrelated.py", "content": "stable"},
+    ])
+    before = [check("behavior-probes", "fail", ids=["probe.api"])]
+
+    def validate(candidate):
+        api = candidate.read_generated_file("api.py")
+        model = candidate.read_generated_file("model.py")
+        unrelated = candidate.read_generated_file("unrelated.py")
+        if unrelated != "stable" or (api == "new-api") != (model == "new-model"):
+            return [check("contracts", "fail")]
+        if api == "new-api":
+            return [check("behavior-probes", "pass")]
+        return before
+
+    accepted, checks = select_non_regressing_repair_subset(
+        workspace,
+        [
+            {"path": "api.py", "content": "new-api"},
+            {"path": "model.py", "content": "new-model"},
+            {"path": "unrelated.py", "content": "regression"},
+        ],
+        {"api.py", "model.py", "unrelated.py"},
+        before,
+        validate,
+    )
+
+    assert {item["path"] for item in accepted} == {"api.py", "model.py"}
+    assert checks == [check("behavior-probes", "pass")]
+
+
 @pytest.mark.parametrize('budget', [1, 2])
 def test_runner_keeps_last_good_files_and_explains_rejection_to_next_attempt(tmp_path, budget):
     import json
