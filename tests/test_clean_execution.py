@@ -125,6 +125,28 @@ def test_local_python_executor_imports_collects_and_runs_tests(tmp_path):
     assert result.paths == ()
 
 
+def test_local_python_executor_supports_declared_src_layout_package(tmp_path):
+    project = tmp_path / "project"
+    _write(project, "src/sample/__init__.py", "def answer():\n    return 42\n")
+    _write(
+        project,
+        "tests/test_sample.py",
+        "from sample import answer\n\n\ndef test_answer():\n    assert answer() == 42\n",
+    )
+    plan = _plan(
+        "src/sample/__init__.py",
+        "tests/test_sample.py",
+        entry="src/sample/__init__.py",
+    )
+    plan["packages"] = [{"import_name": "sample", "purpose": "Test package"}]
+
+    result = _executor().validate(project, plan)
+
+    assert result.passed
+    assert "import-smoke passed for 1 target(s)" in result.message
+    assert "pytest collected and passed 1 test(s)" in result.message
+
+
 def test_local_python_executor_reports_broken_package_import(tmp_path):
     project = tmp_path / "project"
     _write(project, "sample/__init__.py", "from sample.missing import value\n")

@@ -2,17 +2,44 @@ from __future__ import annotations
 
 import ast
 import re
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
 _CALLABLE_KINDS = frozenset({"function", "decorator"})
 _CLASS_KINDS = frozenset({"class", "exception", "protocol"})
+_TYPING_NAMES = frozenset(
+    {
+        "Any",
+        "AnyStr",
+        "BinaryIO",
+        "ClassVar",
+        "Final",
+        "IO",
+        "Literal",
+        "Never",
+        "NoReturn",
+        "Optional",
+        "Protocol",
+        "Self",
+        "TextIO",
+        "TypeAlias",
+        "TypeGuard",
+        "TypeVar",
+        "Union",
+    }
+)
+_TYPING_MODULE_ALIASES = frozenset({"typing", "t"})
 
 
 @dataclass(frozen=True)
 class PythonContractIssue:
     message: str
     paths: tuple[str, ...]
+    symbol_id: str | None = None
+    requirement_ids: tuple[str, ...] = ()
+    expected: str | None = None
+    actual: str | None = None
 
 
 def python_contract_declaration_error(contract: dict[str, Any]) -> str | None:
@@ -90,6 +117,9 @@ def find_python_contract_issues(
                 PythonContractIssue(
                     f"{symbol_id} has {declaration_error}",
                     (path,),
+                    symbol_id=symbol_id,
+                    requirement_ids=tuple(contract["requirement_ids"]),
+                    expected=contract["signature"],
                 )
             )
             continue
@@ -101,6 +131,10 @@ def find_python_contract_issues(
                 PythonContractIssue(
                     f"{path!r} does not define contracted symbol {name!r} ({symbol_id})",
                     (path,),
+                    symbol_id=symbol_id,
+                    requirement_ids=tuple(contract["requirement_ids"]),
+                    expected=contract["signature"],
+                    actual="missing",
                 )
             )
             continue
@@ -110,12 +144,25 @@ def find_python_contract_issues(
                 PythonContractIssue(
                     f"{path!r} defines {name!r} with the wrong kind for {kind} contract {symbol_id}",
                     (path,),
+                    symbol_id=symbol_id,
+                    requirement_ids=tuple(contract["requirement_ids"]),
+                    expected=contract["signature"],
+                    actual=type(binding).__name__,
                 )
             )
             continue
         mismatch = _signature_mismatch(binding, contract)
         if mismatch:
-            issues.append(PythonContractIssue(f"{symbol_id} {mismatch}", (path,)))
+            issues.append(
+                PythonContractIssue(
+                    f"{symbol_id} {mismatch}",
+                    (path,),
+                    symbol_id=symbol_id,
+                    requirement_ids=tuple(contract["requirement_ids"]),
+                    expected=contract["signature"],
+                    actual=_actual_contract_declaration(binding, contract),
+                )
+            )
     return issues
 
 
@@ -193,6 +240,61 @@ def _signature_mismatch(binding: ast.AST, contract: dict[str, Any]) -> str | Non
     return None
 
 
+def _actual_contract_declaration(
+    binding: ast.AST,
+    contract: dict[str, Any],
+) -> str:
+    name = str(contract["qualified_name"]).rsplit(".", 1)[-1]
+    if isinstance(binding, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return _render_callable_declaration(name, binding.args, binding.returns)
+    if isinstance(binding, ast.ClassDef):
+        if _parse_class_declaration_signature(contract["signature"]) is not None:
+            bases = [ast.unparse(base) for base in binding.bases]
+            bases.extend(
+                f"{keyword.arg}={ast.unparse(keyword.value)}"
+                for keyword in binding.keywords
+                if keyword.arg is not None
+            )
+            suffix = f"({', '.join(bases)})" if bases else ""
+            return f"class {name}{suffix}"
+        arguments, drop_first = _class_arguments(binding)
+        return _render_callable_declaration(
+            name,
+            _without_first_argument(arguments) if drop_first else arguments,
+            None,
+        )
+    if isinstance(binding, ast.AnnAssign):
+        return f"{name}: {_annotation(binding.annotation)}"
+    return f"{name}: unannotated"
+
+
+def _render_callable_declaration(
+    name: str,
+    arguments: ast.arguments,
+    returns: ast.expr | None,
+) -> str:
+    declaration = ast.FunctionDef(
+        name=name,
+        args=deepcopy(arguments),
+        body=[ast.Pass()],
+        decorator_list=[],
+        returns=deepcopy(returns),
+        type_comment=None,
+    )
+    ast.fix_missing_locations(declaration)
+    header = ast.unparse(declaration).splitlines()[0]
+    return header.removeprefix("def ").removesuffix(":")
+
+
+def _without_first_argument(arguments: ast.arguments) -> ast.arguments:
+    normalized = deepcopy(arguments)
+    if normalized.posonlyargs:
+        normalized.posonlyargs.pop(0)
+    elif normalized.args:
+        normalized.args.pop(0)
+    return normalized
+
+
 def _class_method_mismatch(
     actual_class: ast.ClassDef,
     expected_class: ast.ClassDef,
@@ -259,11 +361,22 @@ def _parse_callable_signature(signature: str) -> ast.FunctionDef | None:
 def _parse_class_declaration_signature(signature: str) -> ast.ClassDef | None:
     normalized = _normalise_signature_markup(signature)
     candidate = re.sub(
-        r":\s*(?=def\s+__init__\s*\()",
-        ":\n    ",
+        r":\s*(?=def\s+\w+\s*\()",
+        "__CLEAN_CLASS_COLON__\n    ",
         normalized.strip(),
         count=1,
     )
+    candidate = re.sub(
+        r":\s*(?=def\s+\w+\s*\()",
+        ":\n        ...\n    ",
+        candidate,
+    )
+    candidate = re.sub(
+        r"\.\.\.\s+(?=def\s+\w+\s*\()",
+        "...\n    ",
+        candidate,
+    )
+    candidate = candidate.replace("__CLEAN_CLASS_COLON__", ":")
     try:
         tree = ast.parse(candidate)
     except SyntaxError:
@@ -422,7 +535,55 @@ def _argument(argument: ast.arg | None) -> tuple[str, str | None] | None:
 
 
 def _annotation(node: ast.expr | None) -> str | None:
-    return ast.unparse(node) if node is not None else None
+    if node is None:
+        return None
+    return ast.unparse(_normalise_annotation(node))
+
+
+def _normalise_annotation(node: ast.expr) -> ast.expr:
+    """Canonicalize common equivalent spellings used in generated type hints.
+
+    Contracts are parsed outside the generated module, so they cannot share its
+    imports. Treating ``typing.BinaryIO`` and ``BinaryIO`` as different APIs
+    creates false failures even though both annotations resolve to the same
+    typing object.
+    """
+    if (
+        isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id in _TYPING_MODULE_ALIASES
+        and node.attr in _TYPING_NAMES
+    ):
+        return ast.copy_location(ast.Name(id=node.attr, ctx=ast.Load()), node)
+    if isinstance(node, ast.Name):
+        return ast.Name(id=node.id, ctx=ast.Load())
+    if isinstance(node, ast.Subscript):
+        return ast.copy_location(
+            ast.Subscript(
+                value=_normalise_annotation(node.value),
+                slice=_normalise_annotation(node.slice),
+                ctx=ast.Load(),
+            ),
+            node,
+        )
+    if isinstance(node, ast.Tuple):
+        return ast.copy_location(
+            ast.Tuple(
+                elts=[_normalise_annotation(item) for item in node.elts],
+                ctx=ast.Load(),
+            ),
+            node,
+        )
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+        return ast.copy_location(
+            ast.BinOp(
+                left=_normalise_annotation(node.left),
+                op=ast.BitOr(),
+                right=_normalise_annotation(node.right),
+            ),
+            node,
+        )
+    return node
 
 
 def _expression(node: ast.expr | None) -> str | None:

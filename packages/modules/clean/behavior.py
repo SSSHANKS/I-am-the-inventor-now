@@ -1,0 +1,581 @@
+from __future__ import annotations
+
+import ast
+import hashlib
+import math
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Protocol
+
+from packages.modules.clean.diagnostics import CleanDiagnostic
+
+MAX_BEHAVIOR_PROBES = 64
+MAX_PROBE_CHARS = 32_000
+MAX_SUITE_CHARS = 256_000
+
+_FORBIDDEN_IMPORT_ROOTS = frozenset(
+    {
+        "ctypes",
+        "ftplib",
+        "http",
+        "multiprocessing",
+        "requests",
+        "smtplib",
+        "socket",
+        "urllib",
+        "webbrowser",
+    }
+)
+_FORBIDDEN_CALLS = frozenset(
+    {
+        "__import__",
+        "compile",
+        "eval",
+        "exec",
+        "input",
+        "os.popen",
+        "os.startfile",
+        "os.system",
+        "subprocess.Popen",
+        "subprocess.call",
+        "subprocess.check_call",
+        "subprocess.check_output",
+        "subprocess.getoutput",
+        "subprocess.getstatusoutput",
+        "subprocess.run",
+    }
+)
+_ABSOLUTE_WINDOWS_PATH = re.compile(r"^[A-Za-z]:[\\/]")
+
+
+class BehaviorProbeError(ValueError):
+    """A behavior probe suite is unsafe or inconsistent with its architecture."""
+
+
+class BehaviorProbeExecutor(Protocol):
+    def validate(
+        self,
+        project_root: Path,
+        architecture: dict[str, Any],
+        manifest: dict[str, Any],
+        suite: dict[str, Any],
+    ) -> list[dict[str, Any]]: ...
+
+
+@dataclass(frozen=True)
+class _ProcessResult:
+    returncode: int | None
+    output: str
+    timed_out: bool = False
+
+
+def validate_behavior_probe_suite(
+    suite: dict[str, Any],
+    architecture: dict[str, Any],
+) -> dict[str, Any]:
+    """Validate coverage and a conservative execution policy before any probe runs."""
+    probes = suite["probes"]
+    if len(probes) > MAX_BEHAVIOR_PROBES:
+        raise BehaviorProbeError(
+            f"Behavior probe suite exceeds the {MAX_BEHAVIOR_PROBES}-probe limit"
+        )
+    if sum(len(item["code"]) for item in probes) > MAX_SUITE_CHARS:
+        raise BehaviorProbeError("Behavior probe suite exceeds the text-size limit")
+
+    identifiers = [item["probe_id"] for item in probes]
+    if len(identifiers) != len(set(identifiers)):
+        raise BehaviorProbeError("Behavior probe suite contains duplicate probe IDs")
+
+    capabilities = {
+        item["capability_id"]: item for item in architecture["capabilities"]
+    }
+    allowed_import_roots = set(sys.stdlib_module_names) | {
+        str(item["qualified_name"]).partition(".")[0]
+        for item in architecture["contracts"]
+        if "." in str(item["qualified_name"])
+    }
+    probes_by_capability: dict[str, list[dict[str, Any]]] = {}
+    assigned_requirements: set[tuple[str, str]] = set()
+    for probe in probes:
+        capability_id = probe["capability_id"]
+        if capability_id not in capabilities:
+            raise BehaviorProbeError(
+                f"Probe {probe['probe_id']} references unknown capability {capability_id}"
+            )
+        capability = capabilities[capability_id]
+        if len(probe["requirement_ids"]) != 1:
+            raise BehaviorProbeError(
+                f"Probe {probe['probe_id']} must cover exactly one requirement"
+            )
+        requirement_id = probe["requirement_ids"][0]
+        assignment = (capability_id, requirement_id)
+        if assignment in assigned_requirements:
+            raise BehaviorProbeError(
+                f"Behavior requirement {requirement_id} is assigned to multiple "
+                f"{capability_id} probes"
+            )
+        assigned_requirements.add(assignment)
+        unknown_requirements = set(probe["requirement_ids"]) - set(
+            capability["requirement_ids"]
+        )
+        if unknown_requirements:
+            raise BehaviorProbeError(
+                f"Probe {probe['probe_id']} claims requirements outside {capability_id}: "
+                + ", ".join(sorted(unknown_requirements))
+            )
+        unknown_scenarios = set(probe["scenario_ids"]) - set(
+            capability["scenario_ids"]
+        )
+        if unknown_scenarios:
+            raise BehaviorProbeError(
+                f"Probe {probe['probe_id']} claims scenarios outside {capability_id}: "
+                + ", ".join(sorted(unknown_scenarios))
+            )
+        _validate_probe_code(
+            probe["probe_id"],
+            probe["code"],
+            allowed_import_roots,
+            requires_boundary_mock=_requires_boundary_mock(capability),
+        )
+        probes_by_capability.setdefault(capability_id, []).append(probe)
+
+    for capability_id, capability in capabilities.items():
+        assigned = probes_by_capability.get(capability_id, [])
+        covered_requirements = {
+            item for probe in assigned for item in probe["requirement_ids"]
+        }
+        missing_requirements = set(capability["requirement_ids"]) - covered_requirements
+        if missing_requirements:
+            raise BehaviorProbeError(
+                f"Behavior probes do not cover {capability_id} requirements: "
+                + ", ".join(sorted(missing_requirements))
+            )
+        covered_scenarios = {item for probe in assigned for item in probe["scenario_ids"]}
+        missing_scenarios = set(capability["scenario_ids"]) - covered_scenarios
+        if missing_scenarios:
+            raise BehaviorProbeError(
+                f"Behavior probes do not use {capability_id} scenarios: "
+                + ", ".join(sorted(missing_scenarios))
+            )
+    return suite
+
+
+def _validate_probe_code(
+    probe_id: str,
+    code: str,
+    allowed_import_roots: set[str],
+    *,
+    requires_boundary_mock: bool,
+) -> None:
+    if len(code) > MAX_PROBE_CHARS:
+        raise BehaviorProbeError(f"Probe {probe_id} exceeds the text-size limit")
+    try:
+        tree = ast.parse(code, filename=f"{probe_id}.py")
+    except SyntaxError as exc:
+        raise BehaviorProbeError(f"Probe {probe_id} is not valid Python") from exc
+    assertions = _executed_assertions(tree)
+    if not assertions:
+        raise BehaviorProbeError(
+            f"Probe {probe_id} contains no module-executed assertions"
+        )
+    if all(_weak_assertion(item.test) for item in assertions):
+        raise BehaviorProbeError(
+            f"Probe {probe_id} contains only type, existence, or non-null assertions"
+        )
+    if requires_boundary_mock and not _uses_unittest_mock(tree):
+        raise BehaviorProbeError(
+            f"Probe {probe_id} must mock external boundary effects with unittest.mock"
+        )
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            roots = {alias.name.partition(".")[0] for alias in node.names}
+            forbidden = roots & _FORBIDDEN_IMPORT_ROOTS
+            if forbidden:
+                raise BehaviorProbeError(
+                    f"Probe {probe_id} imports forbidden module {sorted(forbidden)[0]!r}"
+                )
+            unknown = roots - allowed_import_roots
+            if unknown:
+                raise BehaviorProbeError(
+                    f"Probe {probe_id} imports undeclared module {sorted(unknown)[0]!r}"
+                )
+        elif isinstance(node, ast.ImportFrom):
+            root = (node.module or "").partition(".")[0]
+            if root in _FORBIDDEN_IMPORT_ROOTS:
+                raise BehaviorProbeError(
+                    f"Probe {probe_id} imports forbidden module {root!r}"
+                )
+            if not root or root not in allowed_import_roots:
+                raise BehaviorProbeError(
+                    f"Probe {probe_id} imports undeclared module {root!r}"
+                )
+        elif isinstance(node, ast.Call):
+            name = _call_name(node.func)
+            if name in _FORBIDDEN_CALLS or name.startswith(("os.exec", "os.spawn")):
+                raise BehaviorProbeError(
+                    f"Probe {probe_id} calls forbidden operation {name!r}"
+                )
+        elif isinstance(node, ast.ExceptHandler):
+            if node.type is None or _call_name(node.type) in {"Exception", "BaseException"}:
+                raise BehaviorProbeError(
+                    f"Probe {probe_id} catches an unspecific exception"
+                )
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            value = node.value.strip()
+            normalized = value.replace("\\", "/")
+            if (
+                _ABSOLUTE_WINDOWS_PATH.match(value)
+                or value.startswith(("/etc/", "/home/"))
+                or normalized == ".."
+                or normalized.startswith("../")
+                or "/../" in normalized
+            ):
+                raise BehaviorProbeError(
+                    f"Probe {probe_id} contains a host-absolute path"
+                )
+
+
+def _call_name(node: ast.expr) -> str:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        parent = _call_name(node.value)
+        return f"{parent}.{node.attr}" if parent else node.attr
+    return ""
+
+
+def _executed_assertions(tree: ast.Module) -> list[ast.Assert]:
+    """Return assertions reachable at module execution, excluding uncalled definitions."""
+    assertions: list[ast.Assert] = []
+
+    def visit_statement(statement: ast.stmt) -> None:
+        if isinstance(statement, ast.Assert):
+            assertions.append(statement)
+            return
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            return
+        for child in ast.iter_child_nodes(statement):
+            if isinstance(child, ast.stmt):
+                visit_statement(child)
+
+    for statement in tree.body:
+        visit_statement(statement)
+    return assertions
+
+
+def _weak_assertion(expression: ast.expr) -> bool:
+    if isinstance(expression, ast.Call):
+        return _call_name(expression.func) in {"callable", "hasattr", "isinstance", "issubclass"}
+    if isinstance(expression, ast.Compare) and len(expression.ops) == 1:
+        comparator = expression.comparators[0]
+        if isinstance(expression.ops[0], (ast.Is, ast.IsNot)) and isinstance(
+            comparator, ast.Constant
+        ) and comparator.value is None:
+            return True
+        if isinstance(expression.left, ast.Call) and _call_name(expression.left.func) == "type":
+            return True
+    return False
+
+
+def _uses_unittest_mock(tree: ast.Module) -> bool:
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import) and any(
+            alias.name == "unittest.mock" for alias in node.names
+        ):
+            return True
+        if isinstance(node, ast.ImportFrom) and (node.module or "").startswith(
+            "unittest.mock"
+        ):
+            return True
+        if isinstance(node, ast.ImportFrom) and node.module == "unittest" and any(
+            alias.name == "mock" for alias in node.names
+        ):
+            return True
+    return False
+
+
+def _requires_boundary_mock(capability: dict[str, Any]) -> bool:
+    words = set(re.findall(r"[a-z]+", str(capability.get("purpose", "")).casefold()))
+    return bool(words & {"editor", "external", "http", "network", "process", "spawn"})
+
+
+class LocalPythonBehaviorProbeExecutor:
+    """Execute stable behavior probes in disposable project copies."""
+
+    def __init__(
+        self,
+        *,
+        python_executable: str | Path | None = None,
+        timeout_seconds: float = 15.0,
+        max_output_chars: int = 4_000,
+    ) -> None:
+        if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+            raise ValueError("behavior probe timeout must be finite and positive")
+        if max_output_chars < 256:
+            raise ValueError("behavior probe output limit must be at least 256 characters")
+        self.python_executable = str(python_executable or sys.executable)
+        self.timeout_seconds = timeout_seconds
+        self.max_output_chars = max_output_chars
+
+    def validate(
+        self,
+        project_root: Path,
+        architecture: dict[str, Any],
+        manifest: dict[str, Any],
+        suite: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        validate_behavior_probe_suite(suite, architecture)
+        root = project_root.resolve()
+        if not root.is_dir():
+            return [_failed_suite("Generated project directory is missing", [], [])]
+
+        failures: list[CleanDiagnostic] = []
+        with tempfile.TemporaryDirectory(prefix="cb-") as temporary:
+            temp_root = Path(temporary)
+            for probe in suite["probes"]:
+                probe_root = temp_root / probe["probe_id"]
+                copied_project = probe_root / "project"
+                shutil.copytree(root, copied_project)
+                probe_file = probe_root / "probe.py"
+                probe_file.write_text(probe["code"], encoding="utf-8")
+                before = _snapshot(copied_project)
+                result = self._run(
+                    probe_file,
+                    cwd=copied_project,
+                    environment=_environment(probe_root),
+                    import_roots=_import_roots(copied_project, architecture),
+                    project_root=root,
+                    probe_root=probe_root,
+                )
+                changed = _changed_paths(before, _snapshot(copied_project))
+                if result.returncode == 0 and not changed:
+                    continue
+                paths = _capability_paths(
+                    probe["capability_id"], architecture, manifest
+                )
+                reason = (
+                    "timed out"
+                    if result.timed_out
+                    else (
+                        "modified generated project files: " + ", ".join(changed)
+                        if changed
+                        else f"exited {result.returncode}"
+                    )
+                )
+                message = f"{probe['probe_id']} failed: {reason}"
+                if result.output.strip():
+                    message += "\n" + result.output.strip()
+                failures.append(
+                    CleanDiagnostic(
+                        stage="behavior-validation",
+                        check_id=f"clean.behavior.{probe['probe_id']}",
+                        message=message,
+                        paths=tuple(paths),
+                        contract_ids=tuple(
+                            _capability_contracts(
+                                probe["capability_id"], architecture
+                            )
+                        ),
+                        requirement_ids=tuple(probe["requirement_ids"]),
+                        expected="all asserted observable behaviors pass",
+                        actual=reason,
+                        repair_hint=(
+                            "Repair the implicated production implementation; preserve "
+                            "the behavior probe as the independent oracle."
+                        ),
+                    )
+                )
+
+        if not failures:
+            return [
+                {
+                    "name": "python-behavior-probes",
+                    "status": "pass",
+                    "message": f"Passed {len(suite['probes'])} behavior probe(s)",
+                    "paths": [],
+                }
+            ]
+        paths = sorted({path for item in failures for path in item.paths})
+        return [
+            {
+                "name": "python-behavior-probes",
+                "status": "fail",
+                "message": f"Failed {len(failures)} of {len(suite['probes'])} behavior probe(s)",
+                "paths": paths,
+                "diagnostics": [item.to_dict() for item in failures],
+            }
+        ]
+
+    def _run(
+        self,
+        probe_file: Path,
+        *,
+        cwd: Path,
+        environment: dict[str, str],
+        import_roots: list[Path],
+        project_root: Path,
+        probe_root: Path,
+    ) -> _ProcessResult:
+        bootstrap = (
+            "import runpy,sys;"
+            f"sys.path[:0]={[str(item) for item in import_roots]!r};"
+            f"runpy.run_path({str(probe_file)!r},run_name='__main__')"
+        )
+        try:
+            completed = subprocess.run(
+                [self.python_executable, "-I", "-B", "-c", bootstrap],
+                cwd=cwd,
+                env=environment,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=self.timeout_seconds,
+                check=False,
+                shell=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            return _ProcessResult(
+                None,
+                self._bounded(
+                    _joined_output(exc.stdout, exc.stderr), project_root, probe_root
+                ),
+                timed_out=True,
+            )
+        return _ProcessResult(
+            completed.returncode,
+            self._bounded(
+                _joined_output(completed.stdout, completed.stderr),
+                project_root,
+                probe_root,
+            ),
+        )
+
+    def _bounded(self, output: str, project_root: Path, probe_root: Path) -> str:
+        sanitized = output.replace(str(project_root), "<project>")
+        sanitized = sanitized.replace(str(project_root).replace("\\", "/"), "<project>")
+        sanitized = sanitized.replace(str(probe_root), "<probe>")
+        sanitized = sanitized.replace(str(probe_root).replace("\\", "/"), "<probe>")
+        python_root = str(Path(self.python_executable).resolve().parent)
+        sanitized = sanitized.replace(python_root, "<python-root>")
+        sanitized = sanitized.replace(python_root.replace("\\", "/"), "<python-root>")
+        sanitized = sanitized.replace(self.python_executable, "<python>")
+        if len(sanitized) <= self.max_output_chars:
+            return sanitized
+        omitted = len(sanitized) - self.max_output_chars
+        return f"[... {omitted} characters omitted ...]\n{sanitized[-self.max_output_chars:]}"
+
+
+def _import_roots(project_root: Path, architecture: dict[str, Any]) -> list[Path]:
+    layout = str(architecture["project_profile"]["layout"]).strip().casefold()
+    roots = [project_root]
+    if layout == "src":
+        roots.insert(0, project_root / "src")
+    return roots
+
+
+def _capability_paths(
+    capability_id: str,
+    architecture: dict[str, Any],
+    manifest: dict[str, Any],
+) -> list[str]:
+    capability = next(
+        item for item in architecture["capabilities"] if item["capability_id"] == capability_id
+    )
+    component_ids = set(capability["component_ids"])
+    requirement_ids = set(capability["requirement_ids"])
+    return sorted(
+        item["path"]
+        for item in manifest["files"]
+        if item["component_id"] in component_ids
+        and item["category"] in {"source", "configuration"}
+        and requirement_ids.intersection(item["requirement_ids"])
+    )
+
+
+def _capability_contracts(
+    capability_id: str,
+    architecture: dict[str, Any],
+) -> list[str]:
+    capability = next(
+        item for item in architecture["capabilities"] if item["capability_id"] == capability_id
+    )
+    component_ids = set(capability["component_ids"])
+    requirement_ids = set(capability["requirement_ids"])
+    return sorted(
+        item["contract_id"]
+        for item in architecture["contracts"]
+        if item["component_id"] in component_ids
+        and requirement_ids.intersection(item["requirement_ids"])
+    )
+
+
+def _environment(temp_root: Path) -> dict[str, str]:
+    environment = {
+        key: os.environ[key]
+        for key in ("SYSTEMROOT", "WINDIR")
+        if key in os.environ
+    }
+    environment.update(
+        {
+            "TEMP": str(temp_root),
+            "TMP": str(temp_root),
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONIOENCODING": "utf-8",
+            "PYTHONNOUSERSITE": "1",
+            "PYTHONUTF8": "1",
+        }
+    )
+    return environment
+
+
+def _snapshot(root: Path) -> dict[str, str]:
+    return {
+        path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in root.rglob("*")
+        if path.is_file() and not path.is_symlink()
+    }
+
+
+def _changed_paths(before: dict[str, str], after: dict[str, str]) -> list[str]:
+    return sorted(
+        path
+        for path in before.keys() | after.keys()
+        if before.get(path) != after.get(path)
+    )
+
+
+def _joined_output(stdout: str | bytes | None, stderr: str | bytes | None) -> str:
+    def render(value: str | bytes | None) -> str:
+        if isinstance(value, bytes):
+            return value.decode("utf-8", errors="replace")
+        return value or ""
+
+    return "\n".join(item for item in (render(stdout), render(stderr)) if item)
+
+
+def _failed_suite(
+    message: str,
+    paths: list[str],
+    requirement_ids: list[str],
+) -> dict[str, Any]:
+    diagnostic = CleanDiagnostic(
+        stage="behavior-validation",
+        check_id="clean.python-behavior-probes",
+        message=message,
+        paths=tuple(paths),
+        requirement_ids=tuple(requirement_ids),
+    )
+    return {
+        "name": "python-behavior-probes",
+        "status": "fail",
+        "message": message,
+        "paths": paths,
+        "diagnostics": [diagnostic.to_dict()],
+    }

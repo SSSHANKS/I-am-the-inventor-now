@@ -44,6 +44,55 @@ def test_python_contracts_accept_exact_function_signature(tmp_path):
     assert check["status"] == "pass"
 
 
+def test_python_contracts_accept_equivalent_typing_import_spelling(tmp_path):
+    plan = _plan(
+        "run(stream: typing.BinaryIO, value: typing.Optional[str] = None) "
+        "-> typing.Any"
+    )
+
+    check = _check(
+        tmp_path,
+        (
+            "from typing import Any, BinaryIO, Optional\n\n"
+            "def run(stream: BinaryIO, value: Optional[str] = None) -> Any:\n"
+            "    return stream if value is None else value\n"
+        ),
+        plan,
+    )
+
+    assert check["status"] == "pass"
+
+
+def test_python_contract_failure_summary_does_not_report_negative_omissions(tmp_path):
+    plan = _plan("run(value: str) -> str")
+    plan["symbol_contracts"].append(
+        {
+            "symbol_id": "SYM-002",
+            "qualified_name": "sample.other",
+            "kind": "function",
+            "signature": "other(value: str) -> str",
+            "visibility": "public",
+            "requirement_ids": ["FR-001"],
+        }
+    )
+    plan["files"][0]["provides"].append("SYM-002")
+
+    check = _check(
+        tmp_path,
+        (
+            "def run(value: bytes) -> bytes:\n"
+            "    return value\n\n"
+            "def other(value: bytes) -> bytes:\n"
+            "    return value\n"
+        ),
+        plan,
+    )
+
+    assert check["status"] == "fail"
+    assert "-18 more issue(s)" not in check["message"]
+    assert check["message"].count("arguments do not match") == 2
+
+
 def test_python_contracts_reject_missing_provider_definition(tmp_path):
     check = _check(tmp_path, "def other() -> str:\n    return 'x'\n", _plan("run() -> str"))
 
@@ -68,6 +117,27 @@ def test_python_contracts_reject_function_signature_drift(tmp_path):
 
     assert check["status"] == "fail"
     assert "arguments do not match" in check["message"]
+    assert check["diagnostics"] == [
+        {
+            "diagnostic_id": check["diagnostics"][0]["diagnostic_id"],
+            "stage": "file-contract",
+            "check_id": "python.contract.declaration",
+            "severity": "error",
+            "message": (
+                "SYM-001 arguments do not match contracted signature "
+                "'run(value: str) -> str'"
+            ),
+            "paths": ["sample.py"],
+            "contract_ids": ["SYM-001"],
+            "requirement_ids": ["FR-001"],
+            "expected": "run(value: str) -> str",
+            "actual": "run(value: bytes) -> bytes",
+            "repair_hint": (
+                "Match the authoritative symbol kind, name, arguments, defaults, "
+                "and annotations exactly."
+            ),
+        }
+    ]
 
 
 def test_python_contracts_validate_class_constructor(tmp_path):
@@ -276,6 +346,55 @@ def test_python_contracts_reject_class_protocol_method_drift(tmp_path):
 
     assert check["status"] == "fail"
     assert "method 'run' arguments do not match" in check["message"]
+
+
+def test_python_contracts_accept_single_line_multi_method_class_declaration(tmp_path):
+    plan = _plan(
+        "class Service: def __init__(self, value: str): def close(self) -> None: ...",
+        kind="class",
+        qualified_name="sample.Service",
+    )
+
+    check = _check(
+        tmp_path,
+        (
+            "class Service:\n"
+            "    def __init__(self, value: str):\n"
+            "        self.value = value\n"
+            "    def close(self) -> None:\n"
+            "        return None\n"
+        ),
+        plan,
+    )
+
+    assert check["status"] == "pass"
+
+
+def test_python_contracts_accept_explicit_ellipsis_between_inline_methods(tmp_path):
+    plan = _plan(
+        (
+            "class Service: def __init__(self, value: str) -> None: "
+            "def close(self) -> None: ... def ready(self) -> bool: ..."
+        ),
+        kind="class",
+        qualified_name="sample.Service",
+    )
+
+    check = _check(
+        tmp_path,
+        (
+            "class Service:\n"
+            "    def __init__(self, value: str) -> None:\n"
+            "        self.value = value\n"
+            "    def close(self) -> None:\n"
+            "        return None\n"
+            "    def ready(self) -> bool:\n"
+            "        return True\n"
+        ),
+        plan,
+    )
+
+    assert check["status"] == "pass"
 
 
 def test_python_contracts_reject_executable_class_contract_body(tmp_path):

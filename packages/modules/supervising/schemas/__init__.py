@@ -14,9 +14,13 @@ from packages.modules.supervising.schemas.border import (
     BorderVerdictSchema,
 )
 from packages.modules.supervising.schemas.clean import (
+    CleanArchitectureSchema,
+    CleanBehaviorProbeSuiteSchema,
     CleanBuildReportSchema,
+    CleanDiagnosticSchema,
     CleanFileBatchSchema,
     CleanHandoffSchema,
+    CleanManifestSchema,
     CleanPlanSchema,
     CleanRepairSchema,
 )
@@ -61,9 +65,13 @@ __all__ = [
     "BorderAdjudicationSchema",
     "BorderFindingSchema",
     "BorderVerdictSchema",
+    "CleanArchitectureSchema",
+    "CleanBehaviorProbeSuiteSchema",
     "CleanBuildReportSchema",
+    "CleanDiagnosticSchema",
     "CleanFileBatchSchema",
     "CleanHandoffSchema",
+    "CleanManifestSchema",
     "CleanPlanSchema",
     "CleanRepairSchema",
     "CodeFactsAnalyzerSchema",

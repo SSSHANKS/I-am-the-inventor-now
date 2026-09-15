@@ -11,13 +11,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from config import ConfigError, load_environment, load_settings, setup_logging
 from packages.agents.base_agent import StubTextClient
-from packages.agents.clean_team import CleanBuilderAgent, CleanPlannerAgent, CleanRepairAgent
+from packages.agents.clean_team import (
+    CleanArchitectAgent,
+    CleanBehaviorProbeAgent,
+    CleanBuilderAgent,
+    CleanManifestAgent,
+    CleanRepairAgent,
+)
 from packages.modules.clean import (
     CleanBuildError,
     CleanRunner,
-    LocalPythonValidationExecutor,
     WorkspaceError,
 )
+from packages.modules.clean.adapters.python_readiness import LocalPythonReadinessExecutor
+from packages.modules.clean.behavior import LocalPythonBehaviorProbeExecutor
 from packages.modules.handoff import HandoffError
 
 
@@ -52,8 +59,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--execute-generated-code",
         action="store_true",
         help=(
-            "opt in to local import and pytest validation; this uses restricted child "
-            "processes but is not an OS security sandbox"
+            "opt in to configured executable readiness checks; generated project "
+            "tests are not created; ephemeral behavior probes are executed in disposable "
+            "copies; child processes are restricted but are not an OS security sandbox"
         ),
     )
     parser.add_argument(
@@ -84,24 +92,172 @@ def run(args: argparse.Namespace):
             kwargs["chat_client"] = StubTextClient(_stubbed_clean_reply)
         return kwargs
 
-    validation_executor = None
+    readiness_executor = None
+    behavior_executor = None
+    behavior_prober = None
     if args.execute_generated_code:
-        validation_executor = LocalPythonValidationExecutor(
+        readiness_executor = LocalPythonReadinessExecutor(
             timeout_seconds=args.validation_timeout
         )
+        behavior_executor = LocalPythonBehaviorProbeExecutor(
+            timeout_seconds=args.validation_timeout
+        )
+        behavior_prober = CleanBehaviorProbeAgent(**agent_kwargs("clean_planner"))
 
     runner = CleanRunner(
-        CleanPlannerAgent(**agent_kwargs("clean_planner")),
+        None,
         CleanBuilderAgent(**agent_kwargs("clean_builder")),
         CleanRepairAgent(**agent_kwargs("clean_repair")),
+        architect=CleanArchitectAgent(**agent_kwargs("clean_planner")),
+        manifest_designer=CleanManifestAgent(**agent_kwargs("clean_planner")),
+        behavior_prober=behavior_prober,
+        behavior_executor=behavior_executor,
+        readiness_executor=readiness_executor,
         max_repairs=args.clean_max_repairs,
         syntax_checks=not args.no_validate,
-        validation_executor=validation_executor,
     )
     return runner.run(args.handoff, output)
 
 
 def _stubbed_clean_reply(prompt: str) -> str:
+    if (
+        "<clean_behavior_probe_request>" in prompt
+        or "<clean_behavior_probe_repair_request>" in prompt
+    ):
+        architecture = json.loads(_tag(prompt, "validated_architecture"))
+        capability = (
+            json.loads(_tag(prompt, "target_capability"))
+            if "<target_capability>" in prompt
+            else architecture["capabilities"][0]
+        )
+        probes = []
+        for index, requirement_id in enumerate(capability["requirement_ids"], start=1):
+            probes.append(
+                {
+                    "probe_id": f"PROBE-{index:03d}",
+                    "capability_id": capability["capability_id"],
+                    "requirement_ids": [requirement_id],
+                    "scenario_ids": capability["scenario_ids"],
+                    "code": "from app import main\n\nassert main() in (None,)\n",
+                }
+            )
+        return json.dumps({"schema_version": 1, "probes": probes})
+    if "<clean_architecture_request>" in prompt:
+        compatibility_mode = _tag(prompt, "compatibility_mode")
+        return json.dumps(
+            {
+                "schema_version": 1,
+                "project_profile": {
+                    "kind": "application",
+                    "language": "Python",
+                    "runtime_version": "3.12",
+                    "build_system": "none",
+                    "layout": "flat",
+                    "compatibility_mode": compatibility_mode,
+                },
+                "capabilities": [
+                    {
+                        "capability_id": "CAP-001",
+                        "purpose": "Provide the specified entry point.",
+                        "requirement_ids": ["FR-001"],
+                        "scenario_ids": [],
+                        "component_ids": ["CMP-001"],
+                    }
+                ],
+                "components": [
+                    {
+                        "component_id": "CMP-001",
+                        "purpose": "Implement the specified application behavior.",
+                        "kind": "entrypoint",
+                        "requirement_ids": ["FR-001"],
+                        "depends_on": [],
+                    }
+                ],
+                "contracts": [
+                    {
+                        "contract_id": "SYM-001",
+                        "component_id": "CMP-001",
+                        "qualified_name": "app.main",
+                        "kind": "function",
+                        "declaration": "main() -> None",
+                        "visibility": "public",
+                        "requirement_ids": ["FR-001"],
+                    }
+                ],
+                "entry_points": [
+                    {
+                        "entry_point_id": "EP-001",
+                        "component_id": "CMP-001",
+                        "description": "Stub application entry point.",
+                        "contract_ids": ["SYM-001"],
+                    }
+                ],
+                "dependency_decisions": [],
+                "proposals": [],
+                "unresolved_gaps": [
+                    "Stub mode does not reconstruct real behaviour."
+                ],
+            }
+        )
+    if "<clean_manifest_request>" in prompt:
+        architecture_hash = _tag(prompt, "architecture_sha256")
+        return json.dumps(
+            {
+                "schema_version": 1,
+                "architecture_sha256": architecture_hash,
+                "files": [
+                    {
+                        "path": "app.py",
+                        "category": "source",
+                        "component_id": "CMP-001",
+                        "purpose": "Implement the stub entry point.",
+                        "requirement_ids": ["FR-001"],
+                        "provides": ["SYM-001"],
+                        "requires": [],
+                        "depends_on": [],
+                        "generation_order": 1,
+                        "generation_owner": "model",
+                        "local_validators": ["syntax", "python-contracts"],
+                        "integration_checks": ["python-symbol-coherence"],
+                    },
+                    {
+                        "path": "README.md",
+                        "category": "documentation",
+                        "component_id": "CMP-001",
+                        "purpose": "Document stub usage.",
+                        "requirement_ids": [],
+                        "provides": [],
+                        "requires": [],
+                        "depends_on": ["app.py"],
+                        "generation_order": 2,
+                        "generation_owner": "model",
+                        "local_validators": ["utf8-text"],
+                        "integration_checks": [],
+                    },
+                ],
+                "entry_points": [
+                    {"entry_point_id": "EP-001", "path": "app.py"}
+                ],
+                "readiness_obligations": [
+                    {
+                        "obligation_id": "READY-001",
+                        "kind": "manifest",
+                        "description": "Every planned file is generated.",
+                        "component_ids": ["CMP-001"],
+                        "paths": ["app.py", "README.md"],
+                        "required": True,
+                    },
+                    {
+                        "obligation_id": "READY-002",
+                        "kind": "contracts",
+                        "description": "The entry point matches its contract.",
+                        "component_ids": ["CMP-001"],
+                        "paths": ["app.py"],
+                        "required": True,
+                    },
+                ],
+            }
+        )
     if "<clean_plan_request>" in prompt:
         validation_policy = json.loads(_tag(prompt, "executable_validation_policy"))
         executable_validation_required = validation_policy["enabled"]

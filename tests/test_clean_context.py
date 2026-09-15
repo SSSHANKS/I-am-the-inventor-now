@@ -86,6 +86,14 @@ def test_scoped_context_excludes_unrelated_requirements_and_files():
     assert [item["symbol_id"] for item in context.plan["symbol_contracts"]] == [
         "SYM-001"
     ]
+    assert context.plan["requirement_contracts"] == [
+        {
+            "requirement_id": "FR-001",
+            "statement": "FR-001: Return a greeting.",
+            "implementation_paths": ["app.example"],
+            "test_paths": [],
+        }
+    ]
     assert context.plan["entry_points"] == _plan()["entry_points"]
     assert context.plan["open_questions"] == [
         "Which deployment environment is used?"
@@ -104,6 +112,68 @@ def test_scoped_context_combines_requirements_for_related_files():
     assert "FR-001" in context.specification
     assert "FR-002" in context.specification
     assert "EH-001" not in context.specification
+
+
+def test_implementation_context_includes_dependent_test_candidate_as_evidence():
+    specification = SPECIFICATION + """
+## Test Candidates
+
+- TC-001: Invoke the greeting operation and inspect its stable output.
+"""
+    plan = _plan()
+    plan["files"].append(
+        {
+            "path": "tests/test_greeting.py",
+            "purpose": "Verify greeting output",
+            "requirement_ids": ["FR-001", "TC-001"],
+            "provides": [],
+            "requires": ["SYM-001"],
+            "depends_on": ["app.example"],
+            "generation_order": 3,
+        }
+    )
+
+    context = build_scoped_context(specification, plan, ["app.example"])
+
+    assert context.requirement_ids == ("FR-001",)
+    assert context.supporting_requirement_ids == ("TC-001",)
+    assert "TC-001: Invoke the greeting operation" in context.specification
+    assert context.plan["supporting_test_candidates"] == [
+        {
+            "requirement_id": "TC-001",
+            "statement": (
+                "TC-001: Invoke the greeting operation and inspect its stable output."
+            ),
+            "role": "read-only implementation design evidence",
+        }
+    ]
+    assert [item["path"] for item in context.plan["files"]] == ["app.example"]
+
+
+def test_implementation_context_includes_project_first_scenario_without_test_file():
+    specification = SPECIFICATION + """
+## Test Candidates
+
+- TC-001: Invoke the greeting operation and inspect its stable output.
+"""
+    plan = _plan()
+    plan["files"][0]["scenario_ids"] = ["TC-001"]
+
+    context = build_scoped_context(specification, plan, ["app.example"])
+
+    assert context.requirement_ids == ("FR-001",)
+    assert context.supporting_requirement_ids == ("TC-001",)
+    assert "TC-001: Invoke the greeting operation" in context.specification
+    assert not any(item["path"].startswith("tests/") for item in context.plan["files"])
+    assert context.plan["supporting_test_candidates"] == [
+        {
+            "requirement_id": "TC-001",
+            "statement": (
+                "TC-001: Invoke the greeting operation and inspect its stable output."
+            ),
+            "role": "read-only implementation design evidence",
+        }
+    ]
 
 
 def test_scoped_context_rejects_missing_requirement_text():

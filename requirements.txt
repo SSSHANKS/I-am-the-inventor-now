@@ -10,6 +10,9 @@ marshmallow>=4.0,<5.0
 # Loads the local .env so litellm (underneath AgentProvider) can read provider keys.
 python-dotenv>=1.0
 
+# Clean's opt-in readiness gate assembles generated setuptools projects offline.
+setuptools>=75.0
+
 # --- Dev ---
 pytest>=8.0
 ruff>=0.6

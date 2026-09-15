@@ -21,6 +21,12 @@ def test_clean_cli_stub_builds_without_api_calls_but_does_not_claim_success(tmp_
     report = json.loads(report_path.read_text(encoding="utf-8"))
     assert report["status"] == "partial"
     assert report["validation_level"] == "syntax"
+    assert report["planning_mode"] == "project-first"
+    assert report["runtime_adapter"] == "python-static"
+    assert report["architecture_sha256"]
+    assert report["manifest_sha256"]
+    assert (output / "_clean" / "architecture.json").is_file()
+    assert (output / "_clean" / "manifest.json").is_file()
 
 
 def test_clean_cli_refuses_dirty_run_directory(tmp_path):
@@ -32,7 +38,7 @@ def test_clean_cli_refuses_dirty_run_directory(tmp_path):
     assert main([str(dirty), "--output", str(tmp_path / "output"), "--stub"]) == 2
 
 
-def test_clean_cli_stub_can_pass_local_executable_validation(tmp_path):
+def test_clean_cli_project_first_reaches_readiness_without_generated_tests(tmp_path):
     handoff = export_clean_handoff(
         tmp_path / "handoff",
         "# Stub Project\n\n## Requirements\n\n- FR-001: Provide an entry point.\n",
@@ -53,7 +59,7 @@ def test_clean_cli_stub_can_pass_local_executable_validation(tmp_path):
     )
 
     assert exit_code == 0
-    assert (output / "project" / "tests" / "test_app.py").is_file()
+    assert not (output / "project" / "tests").exists()
     report = json.loads(
         (output / "_clean" / "clean_build_report.json").read_text(encoding="utf-8")
     )
@@ -61,5 +67,6 @@ def test_clean_cli_stub_can_pass_local_executable_validation(tmp_path):
         check for check in report["checks"] if check["name"] == "executable-validation"
     )
     assert report["status"] == "success"
+    assert report["planning_mode"] == "project-first"
     assert executable["status"] == "pass"
-    assert "passed 1 test(s)" in executable["message"]
+    assert "readiness gates passed" in executable["message"]

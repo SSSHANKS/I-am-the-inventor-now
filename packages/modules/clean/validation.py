@@ -3,9 +3,11 @@ from __future__ import annotations
 import ast
 import json
 import tomllib
+from collections.abc import Iterable
 from pathlib import PurePosixPath
 from typing import Any
 
+from packages.modules.clean.diagnostics import CleanDiagnostic
 from packages.modules.clean.python_contracts import find_python_contract_issues
 from packages.modules.clean.python_symbols import find_python_symbol_issues
 from packages.modules.clean.workspace import CleanWorkspace, WorkspaceError
@@ -70,6 +72,7 @@ def validate_project(
         return checks
 
     syntax_failures: list[str] = []
+    syntax_diagnostics: list[CleanDiagnostic] = []
     for path, content in contents.items():
         suffix = PurePosixPath(path).suffix.casefold()
         try:
@@ -79,9 +82,27 @@ def validate_project(
                 json.loads(content)
             elif suffix == ".toml":
                 tomllib.loads(content)
-        except (SyntaxError, ValueError, tomllib.TOMLDecodeError):
+        except (SyntaxError, ValueError, tomllib.TOMLDecodeError) as exc:
             syntax_failures.append(path)
-    checks.append(_check("syntax", not syntax_failures, _message(syntax_failures, "Invalid"), syntax_failures))
+            syntax_diagnostics.append(
+                CleanDiagnostic(
+                    stage="file-validation",
+                    check_id="clean.syntax",
+                    message=f"{path}: {type(exc).__name__}: {exc}",
+                    paths=(path,),
+                    actual=type(exc).__name__,
+                    repair_hint="Return syntactically valid complete file content.",
+                )
+            )
+    checks.append(
+        _check(
+            "syntax",
+            not syntax_failures,
+            _message(syntax_failures, "Invalid"),
+            syntax_failures,
+            diagnostics=syntax_diagnostics,
+        )
+    )
     python_contents = {
         path: content
         for path, content in contents.items()
@@ -127,11 +148,31 @@ def validate_project(
         message = "Passed"
         if issues:
             rendered = "; ".join(issue.message for issue in issues[:20])
-            omitted = len(issues) - 20
-            if omitted:
+            omitted = max(0, len(issues) - 20)
+            if omitted > 0:
                 rendered = f"{rendered}; ... {omitted} more issue(s)"
             message = rendered
-        checks.append(_check("python-symbol-coherence", not issues, message, paths))
+        checks.append(
+            _check(
+                "python-symbol-coherence",
+                not issues,
+                message,
+                paths,
+                diagnostics=(
+                    CleanDiagnostic(
+                        stage="project-validation",
+                        check_id="python.symbol.coherence",
+                        message=issue.message,
+                        paths=issue.paths,
+                        repair_hint=(
+                            "Make local imports, provided symbols, and declared exports "
+                            "coherent without changing unrelated public contracts."
+                        ),
+                    )
+                    for issue in issues
+                ),
+            )
+        )
         contracts = plan.get("symbol_contracts", [])
         if not contracts:
             checks.append(
@@ -150,8 +191,8 @@ def validate_project(
             contract_message = "Passed"
             if contract_issues:
                 rendered = "; ".join(issue.message for issue in contract_issues[:20])
-                omitted = len(contract_issues) - 20
-                if omitted:
+                omitted = max(0, len(contract_issues) - 20)
+                if omitted > 0:
                     rendered = f"{rendered}; ... {omitted} more issue(s)"
                 contract_message = rendered
             checks.append(
@@ -160,6 +201,23 @@ def validate_project(
                     not contract_issues,
                     contract_message,
                     contract_paths,
+                    diagnostics=(
+                        CleanDiagnostic(
+                            stage="file-contract",
+                            check_id="python.contract.declaration",
+                            message=issue.message,
+                            paths=issue.paths,
+                            contract_ids=(issue.symbol_id,) if issue.symbol_id else (),
+                            requirement_ids=issue.requirement_ids,
+                            expected=issue.expected,
+                            actual=issue.actual,
+                            repair_hint=(
+                                "Match the authoritative symbol kind, name, arguments, "
+                                "defaults, and annotations exactly."
+                            ),
+                        )
+                        for issue in contract_issues
+                    ),
                 )
             )
     return checks
@@ -178,13 +236,33 @@ def checks_passed(checks: list[dict[str, Any]]) -> bool:
     return all(check["status"] != "fail" for check in checks)
 
 
-def _check(name: str, passed: bool, message: str, paths: list[str]) -> dict[str, Any]:
-    return {
+def _check(
+    name: str,
+    passed: bool,
+    message: str,
+    paths: list[str],
+    *,
+    diagnostics: Iterable[CleanDiagnostic] = (),
+) -> dict[str, Any]:
+    result = {
         "name": name,
         "status": "pass" if passed else "fail",
         "message": "Passed" if passed else message,
         "paths": paths,
     }
+    if not passed:
+        rendered = [item.to_dict() for item in diagnostics]
+        if not rendered:
+            rendered = [
+                CleanDiagnostic(
+                    stage="project-validation",
+                    check_id=f"clean.{name}",
+                    message=message,
+                    paths=tuple(paths),
+                ).to_dict()
+            ]
+        result["diagnostics"] = rendered
+    return result
 
 
 def _message(paths: list[str], prefix: str) -> str:

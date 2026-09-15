@@ -41,8 +41,31 @@ class PreparedSpecification:
             "schema_version": 1,
             "source_specification_sha256": self.source_sha256,
             "requirement_ids": list(self.requirement_ids),
+            "requirement_statements": [
+                {
+                    "requirement_id": requirement_id,
+                    "statement": statement,
+                }
+                for requirement_id, statement in requirement_statements(self.text).items()
+            ],
             "generated_labels": [label.to_dict() for label in self.generated_labels],
         }
+
+
+def requirement_statements(specification: str) -> dict[str, str]:
+    """Return the authoritative source line for every labeled requirement."""
+    statements: dict[str, str] = {}
+    for line in specification.splitlines():
+        identifiers = REQUIREMENT_ID_PATTERN.findall(line)
+        if not identifiers:
+            continue
+        statement = line.strip()
+        match = _LIST_ITEM_PATTERN.match(statement)
+        if match is not None:
+            statement = match.group("body")
+        for requirement_id in identifiers:
+            statements.setdefault(requirement_id, statement)
+    return statements
 
 
 @dataclass(frozen=True)

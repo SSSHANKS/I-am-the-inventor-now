@@ -4,7 +4,14 @@ import sys
 import pytest
 
 from packages.agents.base_agent import StubTextClient
-from packages.agents.clean_team import CleanBuilderAgent, CleanPlannerAgent, CleanRepairAgent
+from packages.agents.clean_team import (
+    CleanArchitectAgent,
+    CleanBehaviorProbeAgent,
+    CleanBuilderAgent,
+    CleanManifestAgent,
+    CleanPlannerAgent,
+    CleanRepairAgent,
+)
 from packages.modules.clean import (
     CleanBuildError,
     CleanRunner,
@@ -12,7 +19,9 @@ from packages.modules.clean import (
     ExecutableValidationResult,
     LocalPythonValidationExecutor,
 )
-from packages.modules.clean.runner import _normalise_plan, _repair_context
+from packages.modules.clean.behavior import LocalPythonBehaviorProbeExecutor
+from packages.modules.clean.manifest import architecture_sha256
+from packages.modules.clean.runner import _normalise_plan, _repair_context, _repair_paths
 from packages.modules.clean.workspace import CleanWorkspace, WorkspaceError
 from packages.modules.handoff import export_clean_handoff
 
@@ -122,6 +131,234 @@ def test_clean_plan_normalization_rejects_dependency_cycles():
         _normalise_plan(plan)
 
 
+def test_clean_plan_normalization_infers_symbol_provider_dependencies():
+    plan = _plan()
+    plan["files"].append(
+        {
+            "path": "greeting/__init__.py",
+            "purpose": "Expose the greeting API",
+            "requirement_ids": ["FR-001"],
+            "provides": [],
+            "requires": ["SYM-001"],
+            "depends_on": [],
+            "generation_order": 1,
+        }
+    )
+    plan["entry_points"] = [
+        {"path": "greeting/__init__.py", "description": "Package API"}
+    ]
+
+    normalized = _normalise_plan(plan)
+
+    tasks = {item["path"]: item for item in normalized["files"]}
+    assert tasks["greeting/__init__.py"]["depends_on"] == ["greeting.py"]
+    assert tasks["greeting.py"]["generation_order"] == 1
+    assert tasks["greeting/__init__.py"]["generation_order"] == 2
+
+
+def test_clean_plan_normalization_inherits_dependency_requirements_for_tests():
+    plan = _plan_with_test()
+    plan["files"][1]["requirement_ids"] = ["TC-001"]
+
+    normalized = _normalise_plan(plan)
+
+    tasks = {item["path"]: item for item in normalized["files"]}
+    assert tasks["tests/test_greeting.py"]["requirement_ids"] == ["FR-001", "TC-001"]
+
+
+def test_clean_plan_normalization_recovers_unique_test_candidate_allocation():
+    specification = SPECIFICATION + """
+
+## Test Candidates
+
+- TC-001: Execute the greeting and inspect its output.
+"""
+    plan = _plan_with_test()
+    plan["files"][1]["purpose"] = "Verify greeting output behavior"
+
+    normalized = _normalise_plan(plan, specification=specification)
+
+    tasks = {item["path"]: item for item in normalized["files"]}
+    assert tasks["tests/test_greeting.py"]["requirement_ids"] == ["FR-001", "TC-001"]
+
+
+def test_clean_plan_normalization_does_not_guess_unrelated_test_candidate():
+    specification = SPECIFICATION + """
+
+## Test Candidates
+
+- TC-001: Parse a configuration file and inspect its settings.
+"""
+    normalized = _normalise_plan(_plan_with_test(), specification=specification)
+
+    tasks = {item["path"]: item for item in normalized["files"]}
+    assert tasks["tests/test_greeting.py"]["requirement_ids"] == ["FR-001"]
+
+
+def test_clean_plan_normalization_does_not_guess_ambiguous_test_candidate():
+    specification = SPECIFICATION + """
+
+## Test Candidates
+
+- TC-001: Execute the greeting and inspect its output.
+"""
+    plan = _plan_with_test()
+    plan["files"][1]["purpose"] = "Verify greeting output behavior"
+    duplicate = dict(plan["files"][1])
+    duplicate["path"] = "tests/test_greeting_output.py"
+    duplicate["requirement_ids"] = list(duplicate["requirement_ids"])
+    duplicate["requires"] = list(duplicate["requires"])
+    duplicate["depends_on"] = list(duplicate["depends_on"])
+    duplicate["generation_order"] = 3
+    plan["files"].append(duplicate)
+
+    normalized = _normalise_plan(plan, specification=specification)
+
+    test_tasks = [
+        item for item in normalized["files"] if item["path"].startswith("tests/")
+    ]
+    assert all("TC-001" not in task["requirement_ids"] for task in test_tasks)
+
+
+def test_clean_plan_normalization_adds_supplemental_behavior_test():
+    plan = _plan()
+    plan["files"].append(
+        {
+            "path": "greeting/__init__.py",
+            "purpose": "Re-export the greeting API",
+            "requirement_ids": ["FR-001"],
+            "provides": [],
+            "requires": ["SYM-001"],
+            "depends_on": ["greeting.py"],
+            "generation_order": 2,
+        }
+    )
+    normalized = _normalise_plan(
+        plan,
+        specification=SPECIFICATION,
+        ensure_python_test_coverage=True,
+    )
+
+    tasks = {item["path"]: item for item in normalized["files"]}
+    supplemental = tasks["tests/test_greeting_requirements.py"]
+    assert supplemental["requirement_ids"] == ["FR-001"]
+    assert supplemental["requires"] == ["SYM-001"]
+    assert supplemental["depends_on"] == ["greeting.py"]
+    assert tasks["greeting.py"]["generation_order"] < supplemental["generation_order"]
+
+
+def test_clean_plan_normalization_preserves_existing_behavior_coverage():
+    normalized = _normalise_plan(
+        _plan_with_test(),
+        specification=SPECIFICATION,
+        ensure_python_test_coverage=True,
+    )
+
+    test_paths = [
+        item["path"] for item in normalized["files"] if item["path"].startswith("tests/")
+    ]
+    assert test_paths == ["tests/test_greeting.py"]
+
+
+def test_clean_plan_normalization_generates_all_implementation_before_tests():
+    plan = _plan_with_test()
+    plan["files"].append(
+        {
+            "path": "support.py",
+            "purpose": "Additional implementation support",
+            "requirement_ids": [],
+            "provides": [],
+            "requires": [],
+            "depends_on": ["greeting.py"],
+            "generation_order": 3,
+        }
+    )
+
+    normalized = _normalise_plan(plan)
+
+    order = {
+        item["path"]: item["generation_order"] for item in normalized["files"]
+    }
+    assert order["greeting.py"] < order["support.py"] < order["tests/test_greeting.py"]
+
+
+def test_clean_plan_normalization_rejects_implementation_depending_on_tests():
+    plan = _plan_with_test()
+    plan["files"][0]["depends_on"] = ["tests/test_greeting.py"]
+
+    with pytest.raises(WorkspaceError, match="depends on test files"):
+        _normalise_plan(plan)
+
+
+def test_clean_plan_normalization_adds_declared_package_scaffold():
+    plan = _plan()
+    plan["project_kind"] = "library"
+    plan["packages"] = [
+        {"import_name": "greeting", "purpose": "Public greeting package"}
+    ]
+
+    normalized = _normalise_plan(plan)
+
+    tasks = {item["path"]: item for item in normalized["files"]}
+    assert "pyproject.toml" in tasks
+    assert "README.md" in tasks
+    assert tasks["pyproject.toml"]["requirement_ids"] == []
+    assert tasks["README.md"]["requirement_ids"] == []
+
+
+def test_clean_runner_rejects_combined_test_candidates(tmp_path):
+    specification = """# Example
+
+## Functional Requirements
+
+- FR-001: Execute a greeting command.
+
+## Test Candidates
+
+- TC-001: Execute the greeting command and inspect its output.
+- TC-002: Parse a configuration file and inspect its settings.
+"""
+    plan = _plan_with_test()
+    plan["files"][1]["requirement_ids"].extend(["TC-001", "TC-002"])
+    handoff = export_clean_handoff(
+        tmp_path / "handoff", specification, {"status": "pass"}
+    )
+    runner = CleanRunner(
+        _agent(CleanPlannerAgent, json.dumps(plan)),
+        _agent(CleanBuilderAgent, "{}"),
+        _agent(CleanRepairAgent, "{}"),
+    )
+
+    with pytest.raises(CleanBuildError, match="combines distinct test candidates"):
+        runner.run(handoff, tmp_path / "output")
+
+
+def test_clean_runner_rejects_semantically_unrelated_test_candidate(tmp_path):
+    specification = """# Example
+
+## Functional Requirements
+
+- FR-001: Execute a greeting command.
+
+## Test Candidates
+
+- TC-001: Parse a configuration file and inspect its settings.
+"""
+    plan = _plan_with_test()
+    plan["files"][1]["requirement_ids"].append("TC-001")
+    handoff = export_clean_handoff(
+        tmp_path / "handoff", specification, {"status": "pass"}
+    )
+    runner = CleanRunner(
+        _agent(CleanPlannerAgent, json.dumps(plan)),
+        _agent(CleanBuilderAgent, "{}"),
+        _agent(CleanRepairAgent, "{}"),
+    )
+
+    with pytest.raises(CleanBuildError, match="does not correspond"):
+        runner.run(handoff, tmp_path / "output")
+
+
 def _agent(agent_type, response):
     return agent_type(
         model="stub/model",
@@ -215,48 +452,17 @@ class StubValidationExecutor:
         return self.result
 
 
-def test_clean_runner_requires_test_coverage_for_executable_validation(tmp_path):
-    handoff = export_clean_handoff(
-        tmp_path / "handoff", SPECIFICATION, {"status": "pass"}
+def test_clean_normalization_supplies_test_coverage_for_executable_validation():
+    normalized = _normalise_plan(
+        _plan(),
+        specification=SPECIFICATION,
+        ensure_python_test_coverage=True,
     )
-    planner_client = StubTextClient([json.dumps(_plan())])
-    runner = CleanRunner(
-        CleanPlannerAgent(model="stub/model", chat_client=planner_client),
-        _agent(CleanBuilderAgent, "{}"),
-        _agent(CleanRepairAgent, "{}"),
-        validation_executor=LocalPythonValidationExecutor(
-            python_executable=sys.executable
-        ),
-    )
+    executor = LocalPythonValidationExecutor(python_executable=sys.executable)
 
-    with pytest.raises(CleanBuildError, match="Python tests do not cover"):
-        runner.run(handoff, tmp_path / "output")
+    issues = executor.validate_plan(normalized, {"FR-001"})
 
-    assert not (tmp_path / "output").exists()
-    assert (
-        '"adapter": "local-python"' in planner_client.prompts[0]
-    )
-
-
-def test_clean_runner_rejects_incomplete_test_requirement_coverage(tmp_path):
-    plan = _plan_with_test()
-    plan["files"][1]["requirement_ids"] = []
-    handoff = export_clean_handoff(
-        tmp_path / "handoff", SPECIFICATION, {"status": "pass"}
-    )
-    runner = CleanRunner(
-        _agent(CleanPlannerAgent, json.dumps(plan)),
-        _agent(CleanBuilderAgent, "{}"),
-        _agent(CleanRepairAgent, "{}"),
-        validation_executor=LocalPythonValidationExecutor(
-            python_executable=sys.executable
-        ),
-    )
-
-    with pytest.raises(CleanBuildError, match="FR-001"):
-        runner.run(handoff, tmp_path / "output")
-
-    assert not (tmp_path / "output").exists()
+    assert issues == ()
 
 
 def test_clean_runner_rejects_tests_disconnected_from_implementation(tmp_path):
@@ -317,8 +523,10 @@ def test_clean_runner_delegates_plan_policy_to_generic_executor(tmp_path):
 
 
 def test_clean_agents_keep_the_shared_base_constructor():
+    assert "__init__" not in CleanArchitectAgent.__dict__
     assert "__init__" not in CleanPlannerAgent.__dict__
     assert "__init__" not in CleanBuilderAgent.__dict__
+    assert "__init__" not in CleanManifestAgent.__dict__
     assert "__init__" not in CleanRepairAgent.__dict__
 
 
@@ -377,7 +585,7 @@ def test_clean_runner_builds_repairs_without_claiming_static_success_or_reading_
 
     assert not result.succeeded
     assert result.status == "partial"
-    assert result.report["schema_version"] == 3
+    assert result.report["schema_version"] == 4
     assert result.report["compatibility_mode"] == "drop-in"
     assert result.report["validation_level"] == "syntax"
     executable = next(
@@ -435,7 +643,92 @@ def test_clean_runner_reports_failure_when_repair_budget_is_zero(tmp_path):
 
     assert not result.succeeded
     assert result.report["status"] == "partial"
+    assert result.report["repair_stop_reason"] == "repair-budget-exhausted"
     assert result.report_path.is_file()
+
+
+def test_clean_runner_stops_when_repair_repeats_the_same_failure(tmp_path):
+    handoff = export_clean_handoff(
+        tmp_path / "handoff", SPECIFICATION, {"status": "pass"}
+    )
+    builder = _agent(
+        CleanBuilderAgent,
+        json.dumps(
+            {
+                "files": [
+                    {
+                        "path": "greeting.py",
+                        "content": (
+                            "def greeting() -> bytes:\n"
+                            "    return b'wrong'\n"
+                        ),
+                        "requirement_ids": ["FR-001"],
+                    }
+                ],
+                "notes": [],
+            }
+        ),
+    )
+    repair_client = StubTextClient(
+        [
+            json.dumps(
+                {
+                    "replacements": [
+                        {
+                            "path": "greeting.py",
+                            "content": (
+                                "def greeting() -> bytes:\n"
+                                "    return b'still wrong'\n"
+                            ),
+                        }
+                    ],
+                    "rationale": "Changed the body without resolving the contract.",
+                }
+            ),
+            json.dumps(
+                {
+                    "replacements": [
+                        {
+                            "path": "greeting.py",
+                            "content": (
+                                "def greeting() -> str:\n"
+                                "    return 'hello'\n"
+                            ),
+                        }
+                    ],
+                    "rationale": "This response must not be requested.",
+                }
+            ),
+        ]
+    )
+    runner = CleanRunner(
+        _agent(CleanPlannerAgent, json.dumps(_plan())),
+        builder,
+        CleanRepairAgent(model="stub/model", chat_client=repair_client),
+        max_repairs=2,
+    )
+
+    result = runner.run(handoff, tmp_path / "output")
+
+    assert result.report["repair_rounds"] == 1
+    assert result.report["repair_stop_reason"] == "repeated-failure-fingerprint"
+    assert repair_client.call_count == 1
+    record = json.loads(
+        (result.output_root / "_clean/iterations/repair-1.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert record["outcome"] == "stalled"
+    assert record["stop_reason"] == "repeated-failure-fingerprint"
+    assert record["changed_paths"] == ["greeting.py"]
+    assert (
+        record["before_failure_fingerprint"]
+        == record["after_failure_fingerprint"]
+    )
+    assert (
+        record["before_content_hashes"]["greeting.py"]
+        != record["after_content_hashes"]["greeting.py"]
+    )
 
 
 def test_clean_repair_receives_read_only_dependent_context(tmp_path):
@@ -578,6 +871,48 @@ def test_clean_repair_context_includes_direct_dependencies_only(tmp_path, monkey
     assert omitted == ["greeting.py"]
 
 
+def test_pytest_assertion_failure_repairs_implementation_and_freezes_test():
+    plan = _plan_with_test()
+    checks = [
+        {
+            "name": "executable-validation",
+            "status": "fail",
+            "message": "pytest-suite failed: exited 1",
+            "paths": ["greeting.py", "tests/test_greeting.py"],
+        }
+    ]
+
+    assert _repair_paths(checks, plan) == {"greeting.py"}
+
+
+def test_pytest_assertion_failure_maps_test_to_implementation_dependency():
+    plan = _plan_with_test()
+    checks = [
+        {
+            "name": "executable-validation",
+            "status": "fail",
+            "message": "pytest-suite failed: exited 1",
+            "paths": ["tests/test_greeting.py"],
+        }
+    ]
+
+    assert _repair_paths(checks, plan) == {"greeting.py"}
+
+
+def test_pytest_collection_failure_can_repair_test_file():
+    plan = _plan_with_test()
+    checks = [
+        {
+            "name": "executable-validation",
+            "status": "fail",
+            "message": "pytest-collection failed: exited 2",
+            "paths": ["tests/test_greeting.py"],
+        }
+    ]
+
+    assert _repair_paths(checks, plan) == {"tests/test_greeting.py"}
+
+
 def test_clean_runner_rejects_unallocated_requirements_before_creating_output(tmp_path):
     handoff = export_clean_handoff(
         tmp_path / "handoff", SPECIFICATION, {"status": "pass"}
@@ -619,23 +954,6 @@ def test_clean_runner_rejects_duplicate_symbol_providers(tmp_path):
     )
 
     _assert_plan_rejected(tmp_path, plan, "provides symbols more than once")
-
-
-def test_clean_runner_rejects_required_symbol_without_provider_dependency(tmp_path):
-    plan = _plan()
-    plan["files"].append(
-        {
-            "path": "consumer.py",
-            "purpose": "Consume greeting",
-            "requirement_ids": ["FR-001"],
-            "provides": [],
-            "requires": ["SYM-001"],
-            "depends_on": [],
-            "generation_order": 2,
-        }
-    )
-
-    _assert_plan_rejected(tmp_path, plan, "does not depend on its provider")
 
 
 def test_clean_runner_rejects_undeclared_symbol_references(tmp_path):
@@ -837,3 +1155,195 @@ def test_clean_runner_reaches_success_through_real_python_validation(tmp_path):
     assert generation_record["dependency_paths"] == ["greeting.py"]
     assert generation_record["requirement_ids"] == ["FR-001"]
     assert generation_record["symbol_ids"] == ["SYM-001"]
+
+
+def test_project_first_behavior_failure_repairs_production_with_frozen_probe(tmp_path):
+    handoff = export_clean_handoff(
+        tmp_path / "handoff", SPECIFICATION, {"status": "pass"}
+    )
+    architecture = {
+        "schema_version": 1,
+        "project_profile": {
+            "kind": "library",
+            "language": "Python",
+            "runtime_version": "3.12",
+            "build_system": "none",
+            "layout": "flat",
+            "compatibility_mode": "renamed",
+        },
+        "capabilities": [
+            {
+                "capability_id": "CAP-001",
+                "purpose": "Return the specified greeting.",
+                "requirement_ids": ["FR-001"],
+                "scenario_ids": [],
+                "component_ids": ["CMP-001"],
+            }
+        ],
+        "components": [
+            {
+                "component_id": "CMP-001",
+                "purpose": "Provide greeting behavior.",
+                "kind": "domain",
+                "requirement_ids": ["FR-001"],
+                "depends_on": [],
+            }
+        ],
+        "contracts": [
+            {
+                "contract_id": "SYM-001",
+                "component_id": "CMP-001",
+                "qualified_name": "greeting.greeting",
+                "kind": "function",
+                "declaration": "greeting() -> str",
+                "visibility": "public",
+                "requirement_ids": ["FR-001"],
+            }
+        ],
+        "entry_points": [
+            {
+                "entry_point_id": "EP-001",
+                "component_id": "CMP-001",
+                "description": "Public greeting function.",
+                "contract_ids": ["SYM-001"],
+            }
+        ],
+        "dependency_decisions": [],
+        "proposals": [],
+        "unresolved_gaps": [],
+    }
+    manifest = {
+        "schema_version": 1,
+        "architecture_sha256": "0" * 64,
+        "files": [
+            {
+                "path": "greeting.py",
+                "category": "source",
+                "component_id": "CMP-001",
+                "purpose": "Implement greeting behavior.",
+                "requirement_ids": ["FR-001"],
+                "provides": ["SYM-001"],
+                "requires": [],
+                "depends_on": [],
+                "generation_order": 1,
+                "generation_owner": "model",
+                "local_validators": ["syntax", "python-contracts"],
+                "integration_checks": ["python-symbol-coherence"],
+            }
+        ],
+        "entry_points": [{"entry_point_id": "EP-001", "path": "greeting.py"}],
+        "readiness_obligations": [
+            {
+                "obligation_id": "READY-001",
+                "kind": "manifest",
+                "description": "Validate the complete manifest.",
+                "component_ids": ["CMP-001"],
+                "paths": ["greeting.py"],
+                "required": True,
+            }
+        ],
+    }
+    manifest["architecture_sha256"] = architecture_sha256(architecture)
+    probes = {
+        "schema_version": 1,
+        "probes": [
+            {
+                "probe_id": "PROBE-001",
+                "capability_id": "CAP-001",
+                "requirement_ids": ["FR-001"],
+                "scenario_ids": [],
+                "code": "from greeting import greeting\nassert greeting() == 'hello'\n",
+            }
+        ],
+    }
+    probe_client = StubTextClient([json.dumps(probes)])
+    builder = _agent(
+        CleanBuilderAgent,
+        json.dumps(
+            {
+                "files": [
+                    {
+                        "path": "greeting.py",
+                        "content": "def greeting() -> bytes:\n    return b'wrong'\n",
+                        "requirement_ids": ["FR-001"],
+                    }
+                ],
+                "notes": [],
+            }
+        ),
+    )
+    repair_client = StubTextClient(
+        [
+            json.dumps(
+                {
+                    "replacements": [
+                        {
+                            "path": "greeting.py",
+                            "content": "def greeting() -> str:\n    return 'wrong'\n",
+                        }
+                    ],
+                    "rationale": "Restore the public contract.",
+                }
+            ),
+            json.dumps(
+                {
+                    "replacements": [
+                        {
+                            "path": "greeting.py",
+                            "content": "def greeting() -> str:\n    return 'hello'\n",
+                        }
+                    ],
+                    "rationale": "Implement the asserted greeting result.",
+                }
+            ),
+        ]
+    )
+    repairer = CleanRepairAgent(
+        model="stub/model",
+        chat_client=repair_client,
+    )
+
+    class PassingReadiness:
+        def validate(self, project_root, architecture, manifest):
+            return [
+                {
+                    "name": "executable-validation",
+                    "status": "pass",
+                    "message": "Readiness passed",
+                    "paths": [],
+                }
+            ]
+
+    result = CleanRunner(
+        None,
+        builder,
+        repairer,
+        architect=_agent(CleanArchitectAgent, json.dumps(architecture)),
+        manifest_designer=_agent(CleanManifestAgent, json.dumps(manifest)),
+        behavior_prober=CleanBehaviorProbeAgent(
+            model="stub/model", chat_client=probe_client
+        ),
+        behavior_executor=LocalPythonBehaviorProbeExecutor(
+            python_executable=sys.executable,
+            timeout_seconds=10,
+        ),
+        readiness_executor=PassingReadiness(),
+        max_repairs=1,
+    ).run(handoff, tmp_path / "output")
+
+    assert result.succeeded
+    assert result.report["repair_rounds"] == 2
+    assert repair_client.call_count == 2
+    assert probe_client.call_count == 1
+    assert json.loads(
+        (result.output_root / "_clean/behavior_probes.json").read_text(
+            encoding="utf-8"
+        )
+    ) == probes
+    assert result.report["behavior_probe_sha256"]
+    behavior = next(
+        item
+        for item in result.report["checks"]
+        if item["name"] == "python-behavior-probes"
+    )
+    assert behavior["status"] == "pass"

@@ -1,0 +1,363 @@
+import json
+from copy import deepcopy
+
+import pytest
+from marshmallow import ValidationError
+
+from packages.agents.base_agent import StubTextClient
+from packages.agents.clean_team import CleanArchitectAgent
+from packages.modules.clean.architecture import (
+    CleanArchitectureError,
+    normalise_architecture,
+    validate_architecture,
+)
+from packages.modules.supervising.schemas import CleanArchitectureSchema
+
+SPECIFICATION = """# Greeting
+
+## Functional Requirements
+
+- FR-001: Return a greeting for the supplied name.
+
+## Error Handling
+
+- EH-001: Reject an empty name.
+
+## Test Candidates
+
+- TC-001: A normal name produces a greeting.
+"""
+
+
+def _architecture():
+    return {
+        "schema_version": 1,
+        "project_profile": {
+            "kind": "library",
+            "language": "Python",
+            "runtime_version": "3.12",
+            "build_system": "setuptools",
+            "layout": "src",
+            "compatibility_mode": "renamed",
+        },
+        "capabilities": [
+            {
+                "capability_id": "CAP-001",
+                "purpose": "Create validated greetings.",
+                "requirement_ids": ["FR-001", "EH-001"],
+                "scenario_ids": ["TC-001"],
+                "component_ids": ["CMP-001"],
+            }
+        ],
+        "components": [
+            {
+                "component_id": "CMP-001",
+                "purpose": "Implement greeting behavior.",
+                "kind": "domain",
+                "requirement_ids": ["FR-001", "EH-001"],
+                "depends_on": [],
+            }
+        ],
+        "contracts": [
+            {
+                "contract_id": "SYM-001",
+                "component_id": "CMP-001",
+                "qualified_name": "greeting.greet",
+                "kind": "function",
+                "declaration": "greet(name: str) -> str",
+                "visibility": "public",
+                "requirement_ids": ["FR-001", "EH-001"],
+            }
+        ],
+        "entry_points": [
+            {
+                "entry_point_id": "EP-001",
+                "component_id": "CMP-001",
+                "description": "Public greeting function.",
+                "contract_ids": ["SYM-001"],
+            }
+        ],
+        "dependency_decisions": [],
+        "proposals": [
+            {
+                "proposal_id": "PROP-001",
+                "field": "project_profile.layout",
+                "chosen_value": "src",
+                "reason": "Use the runtime adapter baseline.",
+                "source": "adapter-baseline",
+                "affected_component_ids": ["CMP-001"],
+                "affects_public_compatibility": False,
+            }
+        ],
+        "unresolved_gaps": [],
+    }
+
+
+def test_clean_architecture_schema_and_traceability_accept_coherent_design():
+    architecture = CleanArchitectureSchema().load(_architecture())
+
+    assert (
+        validate_architecture(
+            architecture,
+            SPECIFICATION,
+            compatibility_mode="renamed",
+        )
+        is architecture
+    )
+
+
+def test_clean_architecture_keeps_test_candidates_as_scenarios_only():
+    architecture = _architecture()
+    architecture["capabilities"][0]["requirement_ids"].append("TC-001")
+
+    with pytest.raises(ValidationError):
+        CleanArchitectureSchema().load(architecture)
+
+
+def test_clean_architecture_rejects_unallocated_behavior():
+    architecture = _architecture()
+    architecture["capabilities"][0]["requirement_ids"].remove("EH-001")
+
+    with pytest.raises(CleanArchitectureError, match="capabilities: EH-001"):
+        validate_architecture(architecture, SPECIFICATION)
+
+
+def test_clean_architecture_rejects_component_dependency_cycles():
+    architecture = _architecture()
+    architecture["components"][0]["depends_on"] = ["CMP-002"]
+    architecture["components"].append(
+        {
+            "component_id": "CMP-002",
+            "purpose": "Format greeting output.",
+            "kind": "adapter",
+            "requirement_ids": ["FR-001"],
+            "depends_on": ["CMP-001"],
+        }
+    )
+    architecture["capabilities"][0]["component_ids"].append("CMP-002")
+
+    with pytest.raises(CleanArchitectureError, match="dependency cycle"):
+        validate_architecture(architecture, SPECIFICATION)
+
+
+def test_clean_architecture_rejects_contract_outside_component_ownership():
+    architecture = _architecture()
+    architecture["components"][0]["requirement_ids"].remove("EH-001")
+
+    with pytest.raises(CleanArchitectureError, match="requirements are not owned"):
+        validate_architecture(architecture, SPECIFICATION)
+
+
+def test_clean_architecture_rejects_python_module_split_across_components():
+    architecture = _architecture()
+    architecture["components"].append(
+        {
+            "component_id": "CMP-002",
+            "purpose": "Second component",
+            "kind": "adapter",
+            "requirement_ids": ["FR-001"],
+            "depends_on": [],
+        }
+    )
+    architecture["capabilities"][0]["component_ids"].append("CMP-002")
+    architecture["contracts"].append(
+        {
+            "contract_id": "SYM-002",
+            "component_id": "CMP-002",
+            "qualified_name": "greeting.farewell",
+            "kind": "function",
+            "declaration": "farewell(name: str) -> str",
+            "visibility": "public",
+            "requirement_ids": ["FR-001"],
+        }
+    )
+
+    with pytest.raises(CleanArchitectureError, match="modules cannot span"):
+        validate_architecture(architecture, SPECIFICATION)
+
+
+def test_clean_architecture_normalisation_merges_forced_python_module_owners():
+    architecture = _architecture()
+    architecture["components"].append(
+        {
+            "component_id": "CMP-002",
+            "purpose": "Second greeting operation.",
+            "kind": "domain",
+            "requirement_ids": ["FR-001"],
+            "depends_on": ["CMP-001"],
+        }
+    )
+    architecture["capabilities"][0]["component_ids"].append("CMP-002")
+    architecture["contracts"].append(
+        {
+            "contract_id": "SYM-002",
+            "component_id": "CMP-002",
+            "qualified_name": "greeting.farewell",
+            "kind": "function",
+            "declaration": "farewell(name: str) -> str",
+            "visibility": "public",
+            "requirement_ids": ["FR-001"],
+        }
+    )
+
+    result = normalise_architecture(architecture)
+
+    assert [item["component_id"] for item in result["components"]] == ["CMP-001"]
+    assert result["components"][0]["depends_on"] == []
+    assert result["capabilities"][0]["component_ids"] == ["CMP-001"]
+    assert result["contracts"][1]["component_id"] == "CMP-001"
+    assert len(architecture["components"]) == 2
+    validate_architecture(result, SPECIFICATION)
+
+
+def test_clean_architecture_normalisation_recovers_unique_capability_requirement():
+    architecture = _architecture()
+    architecture["capabilities"][0]["requirement_ids"].remove("EH-001")
+
+    result = normalise_architecture(architecture)
+
+    assert result["capabilities"][0]["requirement_ids"] == ["FR-001", "EH-001"]
+    assert architecture["capabilities"][0]["requirement_ids"] == ["FR-001"]
+    validate_architecture(result, SPECIFICATION)
+
+
+def test_clean_architecture_normalisation_aligns_contract_declaration_name():
+    architecture = _architecture()
+    architecture["contracts"][0]["declaration"] = "wrong(name: str) -> str"
+
+    result = normalise_architecture(architecture)
+
+    assert result["contracts"][0]["declaration"] == "greet(name: str) -> str"
+    assert architecture["contracts"][0]["declaration"] == "wrong(name: str) -> str"
+    validate_architecture(result, SPECIFICATION)
+
+
+def test_clean_architecture_normalisation_expands_compact_class_method():
+    architecture = _architecture()
+    architecture["contracts"][0].update(
+        {
+            "qualified_name": "greeting.Greeter",
+            "kind": "class",
+            "declaration": "class Wrong: __init__(self, name: str)",
+        }
+    )
+
+    result = normalise_architecture(architecture)
+
+    assert result["contracts"][0]["declaration"] == (
+        "class Greeter:\n"
+        "    def __init__(self, name: str):\n"
+        "        pass"
+    )
+    validate_architecture(result, SPECIFICATION)
+
+
+def test_clean_architecture_normalisation_expands_semicolon_class_methods():
+    architecture = _architecture()
+    architecture["contracts"][0].update(
+        {
+            "qualified_name": "greeting.AtomicFileWriter",
+            "kind": "class",
+            "declaration": (
+                "class AtomicFileWriter:\n"
+                "    def __init__(self, file_obj: object, temp_filename: str, "
+                "real_filename: str); close(self, replace: bool = True) -> None:\n"
+                "        pass"
+            ),
+        }
+    )
+
+    result = normalise_architecture(architecture)
+
+    assert result["contracts"][0]["declaration"] == (
+        "class AtomicFileWriter:\n"
+        "    def __init__(self, file_obj: object, temp_filename: str, "
+        "real_filename: str):\n"
+        "        ...\n"
+        "    def close(self, replace: bool = True) -> None:\n"
+        "        pass"
+    )
+    validate_architecture(result, SPECIFICATION)
+
+
+def test_clean_architecture_normalisation_splits_cross_module_entry_point():
+    architecture = _architecture()
+    architecture["contracts"].append(
+        {
+            "contract_id": "SYM-002",
+            "component_id": "CMP-001",
+            "qualified_name": "farewell.farewell",
+            "kind": "function",
+            "declaration": "farewell(name: str) -> str",
+            "visibility": "public",
+            "requirement_ids": ["FR-001"],
+        }
+    )
+    architecture["entry_points"][0]["contract_ids"].append("SYM-002")
+
+    result = normalise_architecture(architecture)
+
+    assert result["entry_points"] == [
+        {
+            **architecture["entry_points"][0],
+            "contract_ids": ["SYM-001"],
+        },
+        {
+            **architecture["entry_points"][0],
+            "entry_point_id": "EP-002",
+            "contract_ids": ["SYM-002"],
+        },
+    ]
+    validate_architecture(result, SPECIFICATION)
+
+
+def test_clean_architect_agent_returns_schema_checked_architecture():
+    response = json.dumps(_architecture())
+    client = StubTextClient([response])
+    agent = CleanArchitectAgent(model="stub/model", chat_client=client)
+
+    result = agent.design(
+        SPECIFICATION,
+        compatibility_mode="renamed",
+        runtime_policy={"adapter": "local-python", "tests": False},
+    )
+
+    assert result == _architecture()
+    assert client.call_count == 1
+    prompt = client.prompts[0]
+    assert SPECIFICATION in prompt
+    assert '"adapter": "local-python"' in prompt
+    assert '<required_behavior_ids>\n["FR-001", "EH-001"]' in prompt
+    assert '<required_scenario_ids>\n["TC-001"]' in prompt
+    assert "Do not choose project files or generate tests" in prompt
+    assert agent.source_reader is None
+    assert agent.alias_map is None
+
+
+def test_clean_architect_agent_revises_semantically_invalid_architecture():
+    response = json.dumps(_architecture())
+    client = StubTextClient([response])
+    agent = CleanArchitectAgent(model="stub/model", chat_client=client)
+
+    result = agent.revise(
+        SPECIFICATION,
+        _architecture(),
+        "Architecture does not allocate requirements to capabilities: EH-001",
+        compatibility_mode="renamed",
+        runtime_policy={"adapter": "local-python"},
+    )
+
+    assert result == _architecture()
+    prompt = client.prompts[0]
+    assert "<clean_architecture_repair_request>" in prompt
+    assert "EH-001" in prompt
+    assert '"capability_id": "CAP-001"' in prompt
+
+
+def test_clean_architecture_validation_does_not_mutate_the_artifact():
+    architecture = _architecture()
+    original = deepcopy(architecture)
+
+    validate_architecture(architecture, SPECIFICATION)
+
+    assert architecture == original

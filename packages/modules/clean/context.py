@@ -6,6 +6,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
+from packages.modules.clean.requirements import requirement_statements
 from packages.modules.clean.workspace import WorkspaceError
 
 REQUIREMENT_PATTERN = re.compile(r"\b(?:FR|BR|EH|AC|TC)-\d{3,}\b")
@@ -20,6 +21,7 @@ class ScopedCleanContext:
     specification: str
     plan: dict[str, Any]
     requirement_ids: tuple[str, ...]
+    supporting_requirement_ids: tuple[str, ...]
     symbol_ids: tuple[str, ...]
 
     @property
@@ -33,6 +35,7 @@ class ScopedCleanContext:
     def audit_record(self) -> dict[str, Any]:
         return {
             "requirement_ids": list(self.requirement_ids),
+            "supporting_requirement_ids": list(self.supporting_requirement_ids),
             "symbol_ids": list(self.symbol_ids),
             "specification_bytes": self.specification_bytes,
             "plan_bytes": self.plan_bytes,
@@ -58,6 +61,30 @@ def build_scoped_context(
             }
         )
     )
+    selected_implementation_paths = {
+        item["path"] for item in selected_files if not _is_test_path(item["path"])
+    }
+    supporting_requirement_ids = tuple(
+        sorted(
+            {
+                scenario_id
+                for item in selected_files
+                for scenario_id in item.get("scenario_ids", [])
+            }
+            | {
+                requirement_id
+                for item in plan["files"]
+                if _is_test_path(item["path"])
+                and selected_implementation_paths.intersection(item["depends_on"])
+                for requirement_id in item["requirement_ids"]
+                if requirement_id.startswith("TC-")
+            }
+            - set(requirement_ids)
+        )
+    )
+    context_requirement_ids = tuple(
+        sorted(set(requirement_ids) | set(supporting_requirement_ids))
+    )
     symbol_ids = tuple(
         sorted(
             {
@@ -70,8 +97,38 @@ def build_scoped_context(
     )
     scoped_specification = select_specification_context(
         specification,
-        set(requirement_ids),
+        set(context_requirement_ids),
     )
+    statements = requirement_statements(specification)
+    requirement_contracts = [
+        {
+            "requirement_id": requirement_id,
+            "statement": statements[requirement_id],
+            "implementation_paths": sorted(
+                item["path"]
+                for item in plan["files"]
+                if item["path"] in selected_paths
+                and requirement_id in item["requirement_ids"]
+                and not _is_test_path(item["path"])
+            ),
+            "test_paths": sorted(
+                item["path"]
+                for item in plan["files"]
+                if item["path"] in selected_paths
+                and requirement_id in item["requirement_ids"]
+                and _is_test_path(item["path"])
+            ),
+        }
+        for requirement_id in requirement_ids
+    ]
+    supporting_test_candidates = [
+        {
+            "requirement_id": requirement_id,
+            "statement": statements[requirement_id],
+            "role": "read-only implementation design evidence",
+        }
+        for requirement_id in supporting_requirement_ids
+    ]
     scoped_plan = {
         "schema_version": plan["schema_version"],
         "summary": plan["summary"],
@@ -85,17 +142,20 @@ def build_scoped_context(
         "symbol_contracts": [
             item for item in plan["symbol_contracts"] if item["symbol_id"] in symbol_ids
         ],
+        "requirement_contracts": requirement_contracts,
+        "supporting_test_candidates": supporting_test_candidates,
         "files": selected_files,
         "validation_strategy": plan["validation_strategy"],
         "open_questions": _relevant_open_questions(
             plan["open_questions"],
-            set(requirement_ids),
+            set(context_requirement_ids),
         ),
     }
     context = ScopedCleanContext(
         specification=scoped_specification,
         plan=scoped_plan,
         requirement_ids=requirement_ids,
+        supporting_requirement_ids=supporting_requirement_ids,
         symbol_ids=symbol_ids,
     )
     if context.specification_bytes > MAX_SCOPED_SPECIFICATION_BYTES:
@@ -166,6 +226,17 @@ def _render_selected_lines(lines: list[str], selected: set[int]) -> str:
         rendered.append(lines[index])
         previous = index
     return "".join(rendered).strip() + "\n"
+
+
+def _is_test_path(path: str) -> bool:
+    normalized = path.replace("\\", "/").casefold()
+    name = normalized.rsplit("/", 1)[-1]
+    return (
+        name.startswith("test_")
+        or name.endswith("_test.py")
+        or "/tests/" in f"/{normalized}"
+        or "/test/" in f"/{normalized}"
+    )
 
 
 def _relevant_open_questions(

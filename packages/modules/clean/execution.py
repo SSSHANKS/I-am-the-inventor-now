@@ -17,15 +17,18 @@ import importlib
 import json
 import sys
 
-sys.path.insert(0, sys.argv[1])
+for import_root in reversed(json.loads(sys.argv[1])):
+    sys.path.insert(0, import_root)
 for module_name in json.loads(sys.argv[2]):
     importlib.import_module(module_name)
 """.strip()
 
 _PYTEST_SCRIPT = """
+import json
 import sys
 
-sys.path.insert(0, sys.argv.pop(1))
+for import_root in reversed(json.loads(sys.argv.pop(1))):
+    sys.path.insert(0, import_root)
 from pytest import main
 
 raise SystemExit(main())
@@ -198,6 +201,7 @@ class LocalPythonValidationExecutor:
         planned = {str(item["path"]) for item in plan["files"]}
         before = _snapshot(root)
         import_targets = _import_targets(plan)
+        import_roots = _import_roots(root, plan)
         if not import_targets:
             return ExecutableValidationResult(
                 False,
@@ -214,7 +218,7 @@ class LocalPythonValidationExecutor:
                     "-B",
                     "-c",
                     _IMPORT_SCRIPT,
-                    str(root),
+                    json.dumps([str(path) for path in import_roots]),
                     json.dumps(import_targets),
                 ],
                 cwd=root,
@@ -239,7 +243,7 @@ class LocalPythonValidationExecutor:
                     "-B",
                     "-c",
                     _PYTEST_SCRIPT,
-                    str(root),
+                    json.dumps([str(path) for path in import_roots]),
                     "-p",
                     "no:cacheprovider",
                     "--collect-only",
@@ -261,7 +265,7 @@ class LocalPythonValidationExecutor:
                     "-B",
                     "-c",
                     _PYTEST_SCRIPT,
-                    str(root),
+                    json.dumps([str(path) for path in import_roots]),
                     "-p",
                     "no:cacheprovider",
                     "-q",
@@ -359,11 +363,26 @@ def _validation_environment(temp_root: Path) -> dict[str, str]:
 def _import_targets(plan: dict[str, Any]) -> list[str]:
     planned = {str(item["path"]) for item in plan["files"]}
     targets: set[str] = set()
+    declared_package_paths: set[str] = set()
+    for package in plan.get("packages", []):
+        import_name = str(package.get("import_name", "")).strip()
+        if not import_name:
+            continue
+        suffix = (*import_name.split("."), "__init__.py")
+        for path in planned:
+            parts = PurePosixPath(path).parts
+            if len(parts) >= len(suffix) and parts[-len(suffix) :] == suffix:
+                targets.add(import_name)
+                declared_package_paths.add(path)
     for path in planned:
         pure = PurePosixPath(path)
         if pure.suffix != ".py" or is_python_test_path(path):
             continue
-        if pure.name == "__init__.py" and pure.parent != PurePosixPath("."):
+        if (
+            pure.name == "__init__.py"
+            and pure.parent != PurePosixPath(".")
+            and path not in declared_package_paths
+        ):
             targets.add(".".join(pure.parent.parts))
     for entry in plan.get("entry_points", []):
         pure = PurePosixPath(str(entry["path"]))
@@ -375,6 +394,27 @@ def _import_targets(plan: dict[str, Any]) -> list[str]:
         if module_parts and _parents_are_packages(module_parts[:-1], planned):
             targets.add(".".join(module_parts))
     return sorted(targets)
+
+
+def _import_roots(root: Path, plan: dict[str, Any]) -> list[Path]:
+    """Return project directories that contain planned importable packages."""
+    planned = {str(item["path"]) for item in plan["files"]}
+    relative_roots = {PurePosixPath(".")}
+    for package in plan.get("packages", []):
+        import_name = str(package.get("import_name", "")).strip()
+        if not import_name:
+            continue
+        suffix = (*import_name.split("."), "__init__.py")
+        for path in planned:
+            parts = PurePosixPath(path).parts
+            if len(parts) < len(suffix) or parts[-len(suffix) :] != suffix:
+                continue
+            prefix = parts[: -len(suffix)]
+            relative_roots.add(PurePosixPath(*prefix) if prefix else PurePosixPath("."))
+    return sorted(
+        (root.joinpath(*path.parts).resolve() for path in relative_roots),
+        key=str,
+    )
 
 
 def _parents_are_packages(parts: tuple[str, ...], planned: set[str]) -> bool:

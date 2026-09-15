@@ -48,6 +48,12 @@ def test_assigns_stable_ids_to_standard_requirement_sections():
         "FR-002",
         "TC-001",
     )
+    statements = {
+        item["requirement_id"]: item["statement"]
+        for item in first.audit_record()["requirement_statements"]
+    }
+    assert statements["FR-001"] == "FR-001: Return a greeting."
+    assert statements["TC-001"] == "TC-001: Verify the greeting."
 
 
 def test_preserves_existing_ids_and_avoids_number_collisions():
