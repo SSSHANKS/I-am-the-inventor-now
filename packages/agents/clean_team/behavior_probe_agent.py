@@ -44,6 +44,7 @@ class CleanBehaviorProbeAgent(BaseAgent):
         diagnostic: str,
         *,
         target_capability: dict[str, Any] | None = None,
+        target_requirement_ids: list[str] | None = None,
     ) -> dict[str, Any]:
         prompt = self._prompt(
             "clean_behavior_probe_repair_request",
@@ -53,6 +54,7 @@ class CleanBehaviorProbeAgent(BaseAgent):
             probes=probes,
             diagnostic=diagnostic,
             target_capability=target_capability,
+            target_requirement_ids=target_requirement_ids,
         )
         content = self.run(
             task_instruction=prompt,
@@ -70,6 +72,7 @@ class CleanBehaviorProbeAgent(BaseAgent):
         probes: dict[str, Any] | None = None,
         diagnostic: str | None = None,
         target_capability: dict[str, Any] | None = None,
+        target_requirement_ids: list[str] | None = None,
     ) -> str:
         parts = [
             f"<{request_tag}>",
@@ -81,10 +84,24 @@ class CleanBehaviorProbeAgent(BaseAgent):
                     "<target_capability>",
                     json.dumps(target_capability, ensure_ascii=False, indent=2),
                     "</target_capability>",
-                    "Return probes only for this capability and cover every one of its "
-                    "requirement IDs exactly once.",
                 ]
             )
+            if target_requirement_ids is None:
+                parts.append(
+                    "Return probes only for this capability and cover every one of its "
+                    "requirement IDs exactly once."
+                )
+            else:
+                parts.extend(
+                    [
+                        "<target_requirement_ids>",
+                        json.dumps(target_requirement_ids, ensure_ascii=False),
+                        "</target_requirement_ids>",
+                        "Return probes only for these missing requirement IDs, exactly "
+                        "once each. The probes under review were already validated and "
+                        "are retained by the caller; do not repeat or rewrite them.",
+                    ]
+                )
         if diagnostic is not None:
             parts.extend(
                 [

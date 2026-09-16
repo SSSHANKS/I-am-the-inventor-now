@@ -165,6 +165,7 @@ def validate_behavior_probe_suite(
 
     if not require_complete:
         return suite
+    coverage_errors: list[str] = []
     for capability_id, capability in capabilities.items():
         assigned = probes_by_capability.get(capability_id, [])
         covered_requirements = {
@@ -172,7 +173,7 @@ def validate_behavior_probe_suite(
         }
         missing_requirements = set(capability["requirement_ids"]) - covered_requirements
         if missing_requirements:
-            raise BehaviorProbeError(
+            coverage_errors.append(
                 f"Behavior probes do not cover {capability_id} requirements: "
                 + ", ".join(sorted(missing_requirements))
             )
@@ -186,10 +187,12 @@ def validate_behavior_probe_suite(
     }
     missing_scenarios = required_scenarios - covered_scenarios
     if missing_scenarios:
-        raise BehaviorProbeError(
+        coverage_errors.append(
             "Behavior probes do not use required scenarios: "
             + ", ".join(sorted(missing_scenarios))
         )
+    if coverage_errors:
+        raise BehaviorProbeError("; ".join(coverage_errors))
     return suite
 
 
@@ -496,8 +499,15 @@ def _validate_initialization_probe_focus(
     tree: ast.Module,
     own_text: str,
 ) -> None:
-    initialization_terms = ("initializ", "initial state", "bookkeeping structure")
-    if not any(term in own_text for term in initialization_terms):
+    if "initializ" not in own_text:
+        return
+    # Initialization may be observable without state inspection: importing a
+    # package exposes its public surface and a factory can initialize a cached
+    # instance. Require attribute inspection only when the requirement itself
+    # promises an attribute-like value. Private bookkeeping is rejected by the
+    # architecture-contract validator independently.
+    attribute_terms = ("attribute", "property", "field")
+    if not any(term in own_text for term in attribute_terms):
         return
     assertions = _executed_assertions(tree)
     if any(any(isinstance(node, ast.Attribute) for node in ast.walk(item.test)) for item in assertions):

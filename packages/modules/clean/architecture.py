@@ -13,6 +13,29 @@ class CleanArchitectureError(ValueError):
     """A project-first architecture is internally inconsistent or untraceable."""
 
 
+_BUILD_METADATA_FILENAMES = frozenset({
+    "build.gradle",
+    "build.gradle.kts",
+    "cargo.lock",
+    "cargo.toml",
+    "composer.json",
+    "gemfile",
+    "go.mod",
+    "go.sum",
+    "gradle.properties",
+    "mix.exs",
+    "package-lock.json",
+    "package.json",
+    "pnpm-lock.yaml",
+    "pom.xml",
+    "pubspec.yaml",
+    "pyproject.toml",
+    "setup.cfg",
+    "setup.py",
+    "yarn.lock",
+})
+
+
 def normalise_architecture(architecture: dict[str, Any]) -> dict[str, Any]:
     """Recover uniquely implied allocation and merge forced Python module owners."""
     normalised = deepcopy(architecture)
@@ -383,6 +406,16 @@ def _split_python_entry_points_by_module(architecture: dict[str, Any]) -> None:
     architecture["entry_points"] = normalised_entries
 
 
+def _is_build_metadata_contract_name(qualified_name: str) -> bool:
+    normalised = qualified_name.strip().replace("\\", "/").casefold()
+    if "/" in normalised:
+        return True
+    return any(
+        normalised == filename or normalised.startswith(filename + ".")
+        for filename in _BUILD_METADATA_FILENAMES
+    )
+
+
 def validate_architecture(
     architecture: dict[str, Any],
     specification: str,
@@ -422,6 +455,19 @@ def validate_architecture(
         [item["qualified_name"] for item in contracts.values()],
         "contract qualified names",
     )
+    metadata_contracts = [
+        contract["contract_id"]
+        for contract in contracts.values()
+        if _is_build_metadata_contract_name(str(contract["qualified_name"]))
+    ]
+    if metadata_contracts:
+        raise CleanArchitectureError(
+            "Architecture symbol contracts cannot be project files or build metadata: "
+            + ", ".join(sorted(metadata_contracts))
+            + ". Express required behavior as a callable, type, protocol, or runtime "
+            "constant contract. Build descriptors belong to the manifest and adapter "
+            "baseline, not the public symbol graph."
+        )
     if "python" in str(profile["language"]).casefold():
         module_components: dict[str, set[str]] = {}
         for contract in contracts.values():

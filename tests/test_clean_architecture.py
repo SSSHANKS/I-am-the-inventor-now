@@ -612,6 +612,26 @@ def test_clean_architecture_normalisation_uses_package_import_name():
     validate_architecture(result, SPECIFICATION)
 
 
+def test_build_metadata_cannot_be_declared_as_a_symbol_contract():
+    architecture = _architecture()
+    architecture["contracts"][0].update(
+        {
+            "qualified_name": "pyproject.toml",
+            "kind": "constant",
+            "declaration": (
+                '[build-system]\nrequires = ["setuptools"]\n'
+                'build-backend = "setuptools.build_meta"'
+            ),
+        }
+    )
+
+    with pytest.raises(
+        CleanArchitectureError,
+        match="cannot be project files or build metadata",
+    ):
+        validate_architecture(architecture, SPECIFICATION)
+
+
 def test_clean_architecture_normalisation_recovers_assignment_contract_kind():
     architecture = _architecture()
     architecture["contracts"][0].update(

@@ -61,21 +61,35 @@ def repair_improvements(before: list[dict], after: list[dict]) -> list[str]:
         matching = candidate[check["name"]]
         diagnostics = check.get("diagnostics") or []
         if diagnostics:
+            resolved_before = len(resolved)
             comparable = [
                 item for item in matching
                 if item["status"] == "pass"
                 or (item["status"] == "fail" and item.get("diagnostics"))
             ]
-            remaining = {
-                diagnostic["check_id"]
+            remaining_diagnostics = [
+                diagnostic
                 for item in comparable
                 if item["status"] == "fail"
                 for diagnostic in item.get("diagnostics", [])
+            ]
+            remaining = {
+                diagnostic["check_id"]
+                for diagnostic in remaining_diagnostics
             }
             for diagnostic in diagnostics:
                 check_id = diagnostic["check_id"]
                 if comparable and check_id not in remaining:
                     resolved.append(check_id)
+            if (
+                comparable
+                and len(resolved) == resolved_before
+                and len(remaining_diagnostics) < len(diagnostics)
+            ):
+                resolved.append(
+                    f"{check['name']}:{len(diagnostics) - len(remaining_diagnostics)}"
+                    "-fewer-diagnostics"
+                )
             continue
         paths = sorted(check.get("paths", []))
         same_scope = [

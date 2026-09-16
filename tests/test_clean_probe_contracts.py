@@ -184,3 +184,26 @@ class Callback:
 class Child(P):
     def describe_fixture(self): return "fixture"
 ''', CONTRACTS)
+
+
+@pytest.mark.parametrize("kind", ["protocol", "class"])
+def test_probe_may_implement_declared_observer_collaborator(kind):
+    contracts = [{
+        "qualified_name": "sample.core.EmitterObserver",
+        "kind": kind,
+        "declaration": (
+            "class EmitterObserver:\n"
+            "    def update(self, event: str) -> None: ..."
+        ),
+        "behavior_rules": [{
+            "statement": "Lifecycle notifications are delivered to registered observers."
+        }],
+    }]
+    code = (
+        "from sample.core import EmitterObserver\n"
+        "class CapturingObserver(EmitterObserver):\n"
+        "    def update(self, event: str) -> None:\n"
+        "        self.event = event\n"
+    )
+
+    validate_probe_contracts(code, contracts)

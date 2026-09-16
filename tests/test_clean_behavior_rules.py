@@ -169,6 +169,23 @@ def test_behavior_probe_instruction_isolates_phases_and_exercises_exports():
     assert "import the symbol through the declared public package root" in instruction
 
 
+def test_behavior_probe_revision_can_target_only_missing_requirements():
+    architecture = validate(architecture_with_rule())
+    prompt = CleanBehaviorProbeAgent._prompt(
+        "repair",
+        SPECIFICATION,
+        architecture,
+        _manifest(architecture),
+        probes={"schema_version": 1, "probes": []},
+        diagnostic="AC-001 is missing",
+        target_capability=architecture["capabilities"][0],
+        target_requirement_ids=["AC-001"],
+    )
+
+    assert '<target_requirement_ids>\n["AC-001"]' in prompt
+    assert "do not repeat or rewrite them" in prompt
+
+
 def test_behavior_rule_change_invalidates_architecture_hash():
     architecture = architecture_with_rule()
     changed = deepcopy(architecture)

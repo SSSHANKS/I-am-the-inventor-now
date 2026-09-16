@@ -101,6 +101,27 @@ def test_cross_capability_scenario_needs_one_suite_level_execution():
     validate_behavior_probe_suite(suite, architecture)
 
 
+def test_incomplete_suite_reports_gaps_from_every_capability():
+    architecture = _architecture()
+    architecture["capabilities"] = [
+        {**architecture["capabilities"][0], "requirement_ids": ["FR-001"]},
+        {
+            **architecture["capabilities"][0],
+            "capability_id": "CAP-002",
+            "requirement_ids": ["AC-001"],
+        },
+    ]
+
+    with pytest.raises(BehaviorProbeError) as exc_info:
+        validate_behavior_probe_suite(
+            {"schema_version": 1, "probes": []}, architecture
+        )
+
+    message = str(exc_info.value)
+    assert "CAP-001 requirements: FR-001" in message
+    assert "CAP-002 requirements: AC-001" in message
+
+
 @pytest.mark.parametrize("result", ["hello", "wrong"])
 def test_partial_probes_execute_and_preserve_coverage_gap(tmp_path, result):
     workspace = CleanWorkspace(tmp_path / "output")
@@ -459,6 +480,28 @@ def test_initialization_requirement_must_assert_initialized_state():
         validate_behavior_probe_suite(_suite(code), architecture)
 
 
+def test_cached_factory_initialization_can_be_proved_by_public_identity():
+    architecture = _architecture()
+    architecture["contracts"][0]["behavior_rules"] = [{
+        "aspect": "state",
+        "statement": "A missing name initializes and caches a new instance.",
+        "requirement_ids": ["FR-001"],
+        "source": "specification",
+        "evidence": [{
+            "requirement_id": "FR-001",
+            "excerpt": "initializes and caches a new instance",
+        }],
+    }]
+    code = (
+        "from greeting import greeting\n"
+        "first = greeting()\n"
+        "second = first\n"
+        "assert first is second\n"
+    )
+
+    validate_behavior_probe_suite(_suite(code), architecture)
+
+
 def test_lifecycle_probe_must_register_observer_on_connected_public_channel():
     architecture = _architecture()
     architecture["contracts"][0]["behavior_rules"] = [{
@@ -511,10 +554,13 @@ def test_probe_revisions_accumulate_independently_valid_requirements():
     revised["probes"][0]["code"] = "from greeting import greeting\nassert True"
 
     class ProgressiveProber:
+        target_requirement_ids = None
+
         def design(self, *args, **kwargs):
             return initial
 
         def revise(self, *args, **kwargs):
+            self.target_requirement_ids = kwargs["target_requirement_ids"]
             return revised
 
     runner = CleanRunner.__new__(CleanRunner)
@@ -529,6 +575,8 @@ def test_probe_revisions_accumulate_independently_valid_requirements():
         "FR-001",
         "AC-001",
     }
+    assert runner.behavior_prober.target_requirement_ids == ["AC-001"]
+    assert runner._behavior_probe_audit[0]["missing_requirement_ids"] == []
 
 
 def test_exception_failure_guard_remains_valid(tmp_path):

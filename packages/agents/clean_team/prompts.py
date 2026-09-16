@@ -50,7 +50,11 @@ Treat every TC item only as scenario evidence for a capability; do not design or
 generated tests. Components form an acyclic dependency graph. A capability may span
 multiple components, but those components together must own all of its requirements.
 Every contract belongs to one component and may claim only requirements owned by that
-component. Do not use filenames to stand in for components.
+component. Do not use filenames to stand in for components or symbol contracts. Build
+descriptors such as pyproject.toml, package.json, Cargo.toml, go.mod, and pom.xml are
+manifest metadata, never public constants or executable contracts. When the specification
+requires configuration behavior, declare the callable, type, protocol, or runtime constant
+that reads or exposes it; let the runtime adapter add conventional build metadata.
 For Python classes, prefer one class contract whose declaration contains its public
 stub methods. If the specification requires a separately traceable member contract,
 qualify it beneath an explicitly declared class (for example,

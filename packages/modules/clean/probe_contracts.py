@@ -112,6 +112,20 @@ def validate_probe_contracts(code: str, contracts: list[dict]) -> None:
         result.update(separate_members.get(key, {}))
         return result
 
+    def is_implementable_collaborator(key):
+        contract = class_contracts.get(key, {})
+        if contract.get("kind") == "protocol":
+            return True
+        qualified_name = str(contract.get("qualified_name", "")).casefold()
+        rule_text = " ".join(
+            str(rule.get("statement", ""))
+            for rule in contract.get("behavior_rules", [])
+        ).casefold()
+        return (
+            any(term in qualified_name for term in ("observer", "listener", "callback"))
+            and any(term in rule_text for term in ("observer", "notification", "lifecycle"))
+        )
+
     # A probe must observe production behavior, not supply it in an overriding
     # test subclass and then assert that its own implementation ran.
     local_bases = {}
@@ -129,7 +143,12 @@ def validate_probe_contracts(code: str, contracts: list[dict]) -> None:
     for node in ast.walk(tree):
         if not isinstance(node, ast.ClassDef):
             continue
-        declared = {member for key in local_bases.get(node.name, ()) for member in members(key)}
+        declared = {
+            member
+            for key in local_bases.get(node.name, ())
+            if not is_implementable_collaborator(key)
+            for member in members(key)
+        }
         for statement in node.body:
             assigned = []
             if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):

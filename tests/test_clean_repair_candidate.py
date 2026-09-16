@@ -184,6 +184,51 @@ def test_correlated_safe_files_are_retained_from_a_mixed_repair_batch(tmp_path):
     assert checks == [check("behavior-probes", "pass")]
 
 
+def test_fewer_diagnostics_is_progress_when_check_ids_are_aggregate():
+    before = [{
+        "name": "python-contracts",
+        "status": "fail",
+        "paths": ["module.py"],
+        "diagnostics": [
+            {"check_id": "python.contract.declaration", "message": "return"},
+            {"check_id": "python.contract.declaration", "message": "arguments"},
+        ],
+    }]
+    after = [{
+        "name": "python-contracts",
+        "status": "fail",
+        "paths": ["module.py"],
+        "diagnostics": [
+            {"check_id": "python.contract.declaration", "message": "arguments"},
+        ],
+    }]
+
+    assert repair_improvements(before, after) == [
+        "python-contracts:1-fewer-diagnostics"
+    ]
+
+
+def test_equal_aggregate_diagnostic_count_is_not_progress():
+    before = [{
+        "name": "python-contracts",
+        "status": "fail",
+        "paths": ["module.py"],
+        "diagnostics": [
+            {"check_id": "python.contract.declaration", "message": "return"},
+        ],
+    }]
+    after = [{
+        "name": "python-contracts",
+        "status": "fail",
+        "paths": ["module.py"],
+        "diagnostics": [
+            {"check_id": "python.contract.declaration", "message": "arguments"},
+        ],
+    }]
+
+    assert repair_improvements(before, after) == []
+
+
 @pytest.mark.parametrize('budget', [1, 2])
 def test_runner_keeps_last_good_files_and_explains_rejection_to_next_attempt(tmp_path, budget):
     import json

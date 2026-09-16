@@ -166,6 +166,7 @@ class CleanRunner:
         runtime_adapter: RuntimeAdapter | None = None
         behavior_suite: dict[str, Any] | None = None
         behavior_probe_design_failure: str | None = None
+        self._behavior_probe_audit: list[dict[str, Any]] = []
         adapter_generated_files: list[dict[str, Any]] = []
         validation_policy: dict[str, Any]
         try:
@@ -249,6 +250,14 @@ class CleanRunner:
             workspace.write_metadata_json("manifest.json", manifest)
         if behavior_suite is not None:
             workspace.write_metadata_json("behavior_probes.json", behavior_suite)
+        if self._behavior_probe_audit:
+            workspace.write_metadata_json(
+                "behavior_probe_design.json",
+                {
+                    "schema_version": 1,
+                    "capabilities": self._behavior_probe_audit,
+                },
+            )
         if adapter_generated_files:
             workspace.write_metadata_json(
                 "published_tests.json",
@@ -875,6 +884,8 @@ class CleanRunner:
     ) -> dict[str, Any]:
         """Design a stable oracle once, then keep it fixed through file repairs."""
         assert self.behavior_prober is not None
+        if not hasattr(self, "_behavior_probe_audit"):
+            self._behavior_probe_audit = []
         combined: list[dict[str, Any]] = []
         for capability in architecture["capabilities"]:
             scoped_architecture = deepcopy(architecture)
@@ -886,6 +897,7 @@ class CleanRunner:
                 target_capability=capability,
             )
             accepted_by_requirement: dict[str, dict[str, Any]] = {}
+            capability_attempts: list[dict[str, Any]] = []
             for repair_number in range(self.max_repairs + 1):
                 rejected_messages: list[str] = []
                 architecture_error = None
@@ -933,14 +945,44 @@ class CleanRunner:
                     suite = validate_behavior_probe_suite(
                         partial_suite, scoped_architecture
                     )
+                    capability_attempts.append({
+                        "attempt": repair_number + 1,
+                        "accepted_requirement_ids": sorted(accepted_by_requirement),
+                        "missing_requirement_ids": [],
+                        "diagnostics": list(dict.fromkeys(rejected_messages)),
+                    })
                     break
                 except Exception as exc:
                     rejected_messages.append(f"{type(exc).__name__}: {exc}")
+                    missing_requirement_ids = sorted(
+                        set(capability["requirement_ids"])
+                        - set(accepted_by_requirement)
+                    )
+                    missing_scenario_ids = sorted(
+                        set(capability["scenario_ids"])
+                        - {
+                            scenario_id
+                            for probe in accepted
+                            for scenario_id in probe["scenario_ids"]
+                        }
+                    )
+                    capability_attempts.append({
+                        "attempt": repair_number + 1,
+                        "accepted_requirement_ids": sorted(accepted_by_requirement),
+                        "missing_requirement_ids": missing_requirement_ids,
+                        "missing_scenario_ids": missing_scenario_ids,
+                        "diagnostics": list(dict.fromkeys(rejected_messages)),
+                    })
                     if repair_number >= self.max_repairs:
                         if architecture_error is not None:
                             raise architecture_error from exc
                         suite = partial_suite
                         break
+                    target_requirement_ids = missing_requirement_ids
+                    if not target_requirement_ids and missing_scenario_ids:
+                        target_requirement_ids = [
+                            next(iter(sorted(accepted_by_requirement)))
+                        ]
                     suite = self.behavior_prober.revise(
                         specification,
                         architecture,
@@ -948,7 +990,17 @@ class CleanRunner:
                         partial_suite,
                         "\n".join(dict.fromkeys(rejected_messages)),
                         target_capability=capability,
+                        target_requirement_ids=target_requirement_ids,
                     )
+            self._behavior_probe_audit.append({
+                "capability_id": capability["capability_id"],
+                "attempts": capability_attempts,
+                "accepted_requirement_ids": sorted(accepted_by_requirement),
+                "missing_requirement_ids": sorted(
+                    set(capability["requirement_ids"])
+                    - set(accepted_by_requirement)
+                ),
+            })
             combined.extend(suite["probes"])
         for index, probe in enumerate(combined, start=1):
             probe["probe_id"] = f"PROBE-{index:03d}"
