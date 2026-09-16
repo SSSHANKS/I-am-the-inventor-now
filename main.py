@@ -1,4 +1,4 @@
-"""Run the IATIN Dirty → Border pipeline against a git repository.
+"""Run the IATIN Dirty → Border → Clean pipeline against a git repository.
 
     python main.py https://github.com/owner/project
 
@@ -6,11 +6,13 @@ Clones the repository, indexes it, plans and runs four analysis stages, writes a
 behavioural specification, then Border judges whether anything original leaked.
 A failed Border verdict triggers Dirty repairs (rewrite the leaking passages) and
 re-gates until it passes or ``--border-max-repairs`` is exhausted. A pass exports a
-minimal verified handoff for the separate Clean process; a failure exports nothing.
+minimal verified handoff and reconstructs the project with Clean; a failure exports
+nothing.
 
 The specification is a CROSSING artifact: it describes what the project does, never how
 the original expressed it (CLAUDE.md section 2). Use `--stub` to exercise the whole
-pipeline without spending model credits. Use `--skip-border` for Dirty-only runs.
+pipeline without spending model credits. Use `--skip-border` for Dirty-only runs or
+`--skip-clean` to stop after the verified handoff.
 """
 
 from __future__ import annotations
@@ -19,10 +21,12 @@ import argparse
 import json
 import logging
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from clean_main import run as run_clean
 from config import ConfigError, load_environment, load_settings, setup_logging
 from packages.agents.base_agent import StubTextClient
 from packages.agents.border_team import (
@@ -48,6 +52,7 @@ from packages.modules.boundary import (
     neutral_manifest,
     register_code_identifiers,
 )
+from packages.modules.clean import CleanBuildError, CleanBuildResult, WorkspaceError
 from packages.modules.handoff import HandoffError, export_clean_handoff
 from packages.modules.indexing import SourceCodeIndexer, SourceDocIndexer
 from packages.modules.ingesting import provide_source_ingestor
@@ -67,12 +72,21 @@ log = logging.getLogger("iatin")
 STAGES = ("documentation", "code_facts", "behavior", "specification")
 
 
+@dataclass(frozen=True)
+class PipelineResult:
+    """Artifacts produced by one complete pipeline invocation."""
+
+    specification_path: Path
+    handoff_path: Path | None
+    clean_result: CleanBuildResult | None
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="main.py",
         description=(
             "Read a repository, produce a clean-room behavioural specification, "
-            "and gate it through Border."
+            "gate it through Border, and reconstruct it with Clean."
         ),
     )
     parser.add_argument("repository", help="git URL of the repository to analyse")
@@ -115,11 +129,45 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "documented names; renamed creates a behavior-equivalent API (default: renamed)"
         ),
     )
+    parser.add_argument(
+        "--skip-clean",
+        action="store_true",
+        help="stop after Border exports the verified Clean handoff",
+    )
+    parser.add_argument(
+        "--clean-output",
+        type=Path,
+        default=None,
+        help=(
+            "new or empty Clean workspace "
+            "(default: clean_workspaces/<Dirty run name>)"
+        ),
+    )
+    parser.add_argument(
+        "--clean-max-repairs",
+        type=int,
+        default=2,
+        help="maximum Clean repair attempts per repair stage (default: 2)",
+    )
+    parser.add_argument(
+        "--execute-generated-code",
+        action="store_true",
+        help=(
+            "run supported executable readiness checks and immutable behavior probes; "
+            "child processes are restricted but are not an OS security sandbox"
+        ),
+    )
+    parser.add_argument(
+        "--validation-timeout",
+        type=float,
+        default=30.0,
+        help="per-process Clean validation timeout in seconds (default: 30)",
+    )
     return parser.parse_args(argv)
 
 
-def run(args: argparse.Namespace) -> Path:
-    """The whole pipeline. Returns the path of the specification it wrote."""
+def run(args: argparse.Namespace) -> PipelineResult:
+    """Run Dirty, Border, and optionally Clean as one traceable pipeline."""
     log_file = setup_logging()
     load_environment()
     settings = load_settings()
@@ -290,6 +338,8 @@ def run(args: argparse.Namespace) -> Path:
     if leaks:
         log.warning("specification carries %d Dirty BORDER-REVIEW finding(s)", leaks)
 
+    handoff_path: Path | None = None
+    clean_result: CleanBuildResult | None = None
     if args.skip_border:
         log.warning("Border skipped (--skip-border); crossing artifacts were not gated")
     else:
@@ -336,7 +386,48 @@ def run(args: argparse.Namespace) -> Path:
     if not args.keep_clone:
         _discard_clone(manifest.repo_local_path)
 
-    return spec_path
+    if handoff_path is not None and not args.skip_clean:
+        clean_result = _run_clean_stage(args, handoff_path, spec_path)
+        log.info(
+            "stage complete: clean -> %s (%s)",
+            clean_result.project_root,
+            clean_result.status,
+        )
+    elif args.skip_border and not args.skip_clean:
+        log.warning("Clean skipped because Border did not produce a verified handoff")
+
+    return PipelineResult(
+        specification_path=spec_path,
+        handoff_path=handoff_path,
+        clean_result=clean_result,
+    )
+
+
+def _run_clean_stage(
+    args: argparse.Namespace,
+    handoff_path: Path,
+    specification_path: Path,
+) -> CleanBuildResult:
+    """Translate the unified CLI options into one isolated Clean invocation."""
+    clean_output = args.clean_output or (
+        Path(__file__).resolve().parent
+        / "clean_workspaces"
+        / specification_path.parent.name
+    )
+    try:
+        return run_clean(
+            argparse.Namespace(
+                handoff=handoff_path,
+                output=clean_output,
+                clean_max_repairs=args.clean_max_repairs,
+                stub=args.stub,
+                no_validate=False,
+                execute_generated_code=args.execute_generated_code,
+                validation_timeout=args.validation_timeout,
+            )
+        )
+    except ValueError as error:
+        raise WorkspaceError(str(error)) from error
 
 
 def _stubbed_reply(prompt: str) -> str:
@@ -578,7 +669,7 @@ def _discard_clone(path: str | None) -> None:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
-        spec_path = run(args)
+        result = run(args)
     except ConfigError as error:
         print(f"configuration problem: {error}", file=sys.stderr)
         return 2
@@ -589,15 +680,29 @@ def main(argv: list[str] | None = None) -> int:
         print(f"border refused: {error}", file=sys.stderr)
         print(f"verdict: {error.verdict.finding_count} finding(s)", file=sys.stderr)
         return 3
+    except WorkspaceError as error:
+        print(f"clean configuration/input problem: {error}", file=sys.stderr)
+        return 2
+    except CleanBuildError as error:
+        print(f"clean build failed: {error}", file=sys.stderr)
+        return 4
     except KeyboardInterrupt:
         print("interrupted", file=sys.stderr)
         return 130
 
+    spec_path = result.specification_path
     print(f"\nspecification: {spec_path}")
     print(f"artifacts:     {spec_path.parent}")
     if not args.skip_border:
         print(f"border:        {spec_path.parent / 'border_verdict.json'}")
         print(f"clean handoff: {spec_path.parent / 'clean_handoff'}")
+    if result.clean_result is not None:
+        clean = result.clean_result
+        print(f"clean status:  {clean.status}")
+        print(f"validation:    {clean.report['validation_level']}")
+        print(f"project:       {clean.project_root}")
+        print(f"clean report:  {clean.report_path}")
+        return 0 if clean.succeeded else 4
     return 0
 
 

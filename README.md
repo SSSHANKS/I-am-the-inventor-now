@@ -25,10 +25,11 @@ Dirty annotates `BORDER-REVIEW` notes; Border re-scans, asks the configured
 refusal asks Dirty to rewrite (`--border-max-repairs`, default 2) before exiting
 non-zero. Intermediate fail/repair specs and `border_verdict.round-N.json` are kept.
 
-A passing Border gate exports a verified two-file
-`clean_handoff/`. Clean runs separately, receives only that handoff, generates bounded
-files, performs non-executing structural checks, and requests whole-file repairs when
-needed.
+A passing Border gate exports a verified two-file `clean_handoff/`. The main pipeline then
+runs Clean automatically. Clean receives only that handoff, generates bounded files,
+performs structural checks, and requests whole-file repairs when needed. The standalone
+Clean command remains available for repeating reconstruction experiments without rerunning
+Dirty and Border.
 
 ## Run it
 
@@ -36,15 +37,16 @@ needed.
 python -m venv .venv && .venv/Scripts/activate     # Linux/macOS: source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env                               # add your Gemini API key
-python main.py https://github.com/owner/project
+python main.py https://github.com/owner/project --execute-generated-code
 python clean_main.py artifacts/<run>/clean_handoff --output clean_workspaces/<run>
 ```
 
 Output lands in `artifacts/<repo>-<hash>/` — `specification.md`, `border_verdict.json`,
-plus every intermediate artifact. A passing run also writes `clean_handoff/`. The Clean
-command writes the reconstruction to `<output>/project/` and its plan/report to
-`<output>/_clean/`. `--stub` on either command makes no model calls. `--skip-border`
-keeps Dirty's advisory notes but creates no Clean handoff.
+plus every intermediate artifact. A passing run also writes `clean_handoff/`. Clean writes
+the reconstruction to `clean_workspaces/<run>/project/` and its audit data to the adjacent
+metadata directory. `--clean-output` selects another new or empty workspace. `--stub`
+covers the complete pipeline without model calls. `--skip-clean` stops after the verified
+handoff; `--skip-border` performs a Dirty-only run and therefore also skips Clean.
 
 Clean planning and structural generation are language-neutral. Executable validation is
 provided by opt-in adapters: each adapter declares its supported runtimes, capabilities,
@@ -57,15 +59,16 @@ receive deterministic task-scoped requirement excerpts, symbol contracts, plan e
 and generated dependency context. Clean records the included IDs and context byte counts
 under `<output>/_clean/generation/` and repair iteration metadata.
 
-Dirty/Border exit codes: `0` ok, `2` configuration, `3` Border refused after repairs.
-Clean exit codes: `0` success, `2` invalid input/configuration, `4` failed build/checks.
+Unified pipeline exit codes: `0` success, `2` invalid input/configuration, `3` Border
+refused after repairs, `4` Clean failed or remained partial. The standalone Clean command
+uses `0`, `2`, and `4` with the same Clean meanings.
 
 `--border-max-repairs N` controls how many Dirty rewrites Border may request (default 2).
 
 ## Layout
 
 ```
-main.py                    CLI entry point (Dirty → Border → verified handoff)
+main.py                    CLI entry point (Dirty → Border → Clean)
 clean_main.py              isolated Clean CLI
 config/                    agent → model mapping, model profiles
 packages/agents/           planning, dirt_team, border_team, clean_team, base agent
