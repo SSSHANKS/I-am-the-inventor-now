@@ -3,17 +3,21 @@ from copy import deepcopy
 
 import pytest
 from marshmallow import ValidationError
+from test_clean_architecture import SPECIFICATION, _architecture
+from test_clean_manifest import _manifest
 
 from packages.agents.clean_team.behavior_probe_agent import CleanBehaviorProbeAgent
 from packages.agents.clean_team.prompts import BEHAVIOR_PROBE_INSTRUCTION
-from packages.modules.clean.architecture import validate_architecture, CleanArchitectureError
+from packages.modules.clean.architecture import (
+    CleanArchitectureError,
+    salvage_ungrounded_behavior_rules,
+    validate_architecture,
+)
 from packages.modules.clean.context import build_scoped_context
 from packages.modules.clean.manifest import architecture_sha256
 from packages.modules.clean.runner import _compatibility_plan
 from packages.modules.supervising.schemas import CleanArchitectureSchema
 from packages.modules.supervising.schemas.clean import CleanSymbolContractSchema
-from test_clean_architecture import _architecture, SPECIFICATION
-from test_clean_manifest import _manifest
 
 
 def rule(**changes):
@@ -105,6 +109,34 @@ def test_behavior_rule_evidence_does_not_ignore_behavioral_parentheses():
 def test_behavior_rules_reject_unsupported_claims(changes, message):
     with pytest.raises(CleanArchitectureError, match=message):
         validate(architecture_with_rule(**changes))
+
+
+def test_salvage_discards_only_ungrounded_specification_rules():
+    architecture = architecture_with_rule(statement="Unsupported inferred behavior.")
+    architecture["contracts"][0]["behavior_rules"].append(rule())
+
+    salvaged, discarded = salvage_ungrounded_behavior_rules(
+        architecture, SPECIFICATION
+    )
+
+    assert len(discarded) == 1
+    assert discarded[0]["contract_id"] == "SYM-001"
+    assert salvaged["contracts"][0]["behavior_rules"] == [rule()]
+    assert "Unsupported inferred behavior" in salvaged["unresolved_gaps"][-1]
+
+
+def test_salvage_does_not_hide_unrelated_architecture_defects():
+    architecture = architecture_with_rule(statement="Unsupported inferred behavior.")
+    architecture["components"][0]["depends_on"] = ["CMP-001"]
+    salvaged, discarded = salvage_ungrounded_behavior_rules(
+        architecture, SPECIFICATION
+    )
+
+    assert discarded
+    with pytest.raises(CleanArchitectureError, match="depends on itself"):
+        validate_architecture(
+            salvaged, SPECIFICATION, compatibility_mode="renamed"
+        )
 
 
 def proposal_architecture():
@@ -219,11 +251,18 @@ def test_synthesis_accepts_distinct_evidence_per_requirement():
 def test_per_requirement_evidence_cannot_be_missing_or_misattributed(change, message):
     architecture = combined_architecture()
     evidence = architecture['contracts'][0]['behavior_rules'][0]['evidence']
-    if change == 'missing': evidence.pop()
-    elif change == 'duplicate': evidence.append(deepcopy(evidence[0]))
-    elif change == 'foreign': evidence[0]['requirement_id'] = 'FR-999'
-    elif change == 'wrong-quote': evidence[0]['excerpt'] = 'Return JSON.'
-    else: evidence[0]['excerpt'], evidence[1]['excerpt'] = evidence[1]['excerpt'], evidence[0]['excerpt']
+    if change == 'missing':
+        evidence.pop()
+    elif change == 'duplicate':
+        evidence.append(deepcopy(evidence[0]))
+    elif change == 'foreign':
+        evidence[0]['requirement_id'] = 'FR-999'
+    elif change == 'wrong-quote':
+        evidence[0]['excerpt'] = 'Return JSON.'
+    else:
+        evidence[0]['excerpt'], evidence[1]['excerpt'] = (
+            evidence[1]['excerpt'], evidence[0]['excerpt']
+        )
     with pytest.raises(CleanArchitectureError, match=message):
         validate(architecture)
 

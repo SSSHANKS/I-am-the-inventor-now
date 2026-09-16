@@ -28,6 +28,7 @@ from packages.modules.clean.adapters import (
 from packages.modules.clean.architecture import (
     normalise_architecture,
     normalise_behavior_rule_evidence,
+    salvage_ungrounded_behavior_rules,
     validate_architecture,
 )
 from packages.modules.clean.behavior import (
@@ -818,6 +819,13 @@ class CleanRunner:
                     "diagnostic": _safe_error(exc),
                 })
                 if repair_number >= self.max_repairs:
+                    recovered = self._recover_ungrounded_architecture(
+                        architecture,
+                        specification,
+                        compatibility_mode=compatibility_mode,
+                    )
+                    if recovered is not None:
+                        return recovered
                     raise _ArchitecturePlanningFailure(
                         _safe_error(exc), architecture, attempts,
                     ) from exc
@@ -827,10 +835,48 @@ class CleanRunner:
                         compatibility_mode=compatibility_mode, runtime_policy=validation_policy,
                     )
                 except Exception as revision_error:
+                    recovered = self._recover_ungrounded_architecture(
+                        architecture,
+                        specification,
+                        compatibility_mode=compatibility_mode,
+                    )
+                    if recovered is not None:
+                        return recovered
                     raise _ArchitecturePlanningFailure(
                         f"Architecture revision failed: {_safe_error(revision_error)}",
                         architecture, attempts,
                     ) from revision_error
+
+    @staticmethod
+    def _recover_ungrounded_architecture(
+        architecture: dict[str, Any],
+        specification: str,
+        *,
+        compatibility_mode: str,
+    ) -> dict[str, Any] | None:
+        """Continue only when dropping false evidence links makes the design valid."""
+        try:
+            candidate = CleanArchitectureSchema().load(architecture)
+            candidate = normalise_architecture(candidate)
+            candidate = normalise_behavior_rule_evidence(candidate, specification)
+            candidate, discarded = salvage_ungrounded_behavior_rules(
+                candidate, specification
+            )
+            if not discarded:
+                return None
+            validated = validate_architecture(
+                candidate,
+                specification,
+                compatibility_mode=compatibility_mode,
+            )
+        except Exception:
+            return None
+        log.warning(
+            "Architecture recovery omitted %d ungrounded behavior rule(s); "
+            "details remain in unresolved_gaps",
+            len(discarded),
+        )
+        return validated
 
     def _design_manifest(
         self,

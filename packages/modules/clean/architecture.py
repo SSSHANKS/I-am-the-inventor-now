@@ -179,6 +179,63 @@ def normalise_behavior_rule_evidence(
     return architecture
 
 
+def salvage_ungrounded_behavior_rules(
+    architecture: dict[str, Any],
+    specification: str,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Discard only specification rules whose claimed provenance is invalid.
+
+    This is a last-resort planning recovery, not normalisation.  It keeps the
+    contract and its requirement allocation intact, records every omitted rule as
+    an unresolved gap, and leaves all unrelated semantic defects for validation to
+    reject.  Clean therefore continues with less asserted behavior instead of
+    accepting a false evidence link or aborting the entire reconstruction.
+    """
+    salvaged = deepcopy(architecture)
+    statements = requirement_statements(specification)
+    discarded: list[dict[str, Any]] = []
+    for contract in salvaged.get("contracts", []):
+        retained = []
+        for rule in contract.get("behavior_rules", []):
+            if rule.get("source") != "specification":
+                retained.append(rule)
+                continue
+            claimed_ids = list(rule.get("requirement_ids", []))
+            evidence = rule.get("evidence") or [
+                {"requirement_id": requirement_id, "excerpt": rule.get("statement", "")}
+                for requirement_id in claimed_ids
+            ]
+            evidence_ids = [item.get("requirement_id") for item in evidence]
+            grounded = (
+                bool(claimed_ids)
+                and len(claimed_ids) == len(set(claimed_ids))
+                and set(claimed_ids).issubset(set(contract.get("requirement_ids", [])))
+                and len(evidence_ids) == len(set(evidence_ids))
+                and set(evidence_ids) == set(claimed_ids)
+                and all(_evidence_matches_requirement(item, statements) for item in evidence)
+            )
+            if grounded:
+                retained.append(rule)
+                continue
+            discarded.append({
+                "contract_id": contract.get("contract_id"),
+                "requirement_ids": claimed_ids,
+                "statement": str(rule.get("statement", "")),
+            })
+        contract["behavior_rules"] = retained
+
+    gaps = salvaged.setdefault("unresolved_gaps", [])
+    for item in discarded:
+        requirements = ", ".join(item["requirement_ids"]) or "no requirement"
+        gap = (
+            "Clean omitted an ungrounded behavior rule from "
+            f"{item['contract_id']} ({requirements}): {item['statement']}"
+        )
+        if gap not in gaps:
+            gaps.append(gap)
+    return salvaged, discarded
+
+
 def _normalise_python_package_surface_names(
     architecture: dict[str, Any],
 ) -> None:
